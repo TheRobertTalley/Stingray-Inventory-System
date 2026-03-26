@@ -1,0 +1,15 @@
+# Python/Node leftovers
+__pycache__/
+node_modules/
+
+# Editor/system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Arduino / PlatformIO
+*.elf
+*.bin
+*.map
+.pio/
