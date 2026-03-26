@@ -72,17 +72,39 @@ jobs:
           project_id = "stingray-inventory-system"
           project_dir = root / "projects" / project_id
           project_dir.mkdir(parents=True, exist_ok=True)
+          short_sha = os.environ["SOURCE_SHA"][:7]
+
+          # Remove previous versioned artifacts so only the latest commit artifacts remain.
+          for pattern in (
+            "bootloader-*.bin",
+            "partitions-*.bin",
+            "boot_app0-*.bin",
+            "firmware-*.bin",
+            "manifest-*.json",
+          ):
+            for stale in project_dir.glob(pattern):
+              stale.unlink()
+
+          versioned_names = {
+            "bootloader.bin": f"bootloader-{short_sha}.bin",
+            "partitions.bin": f"partitions-{short_sha}.bin",
+            "boot_app0.bin": f"boot_app0-{short_sha}.bin",
+            "firmware.bin": f"firmware-{short_sha}.bin",
+          }
 
           artifacts = Path("artifacts")
           for name in ("bootloader.bin", "partitions.bin", "boot_app0.bin", "firmware.bin"):
             source = artifacts / name
             if not source.exists():
               raise SystemExit(f"Missing artifact: {source}")
+            # Keep canonical names for convenience/debug and publish versioned names for cache busting.
             shutil.copy2(source, project_dir / name)
+            shutil.copy2(source, project_dir / versioned_names[name])
 
           now = datetime.now(timezone.utc)
           updated = now.strftime("%Y-%m-%d")
           version = f"{now.strftime('%Y.%m.%d')}+{os.environ['SOURCE_SHA'][:7]}"
+          manifest_file = f"manifest-{short_sha}.json"
 
           manifest = {
             "name": "STINGRAY INVENTORY SYSTEM (T-Dongle S3)",
@@ -91,15 +113,16 @@ jobs:
               {
                 "chipFamily": "ESP32-S3",
                 "parts": [
-                  {"path": "bootloader.bin", "offset": 0},
-                  {"path": "partitions.bin", "offset": 32768},
-                  {"path": "boot_app0.bin", "offset": 57344},
-                  {"path": "firmware.bin", "offset": 65536},
+                  {"path": versioned_names["bootloader.bin"], "offset": 0},
+                  {"path": versioned_names["partitions.bin"], "offset": 32768},
+                  {"path": versioned_names["boot_app0.bin"], "offset": 57344},
+                  {"path": versioned_names["firmware.bin"], "offset": 65536},
                 ],
               }
             ],
           }
           (project_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          (project_dir / manifest_file).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
           catalog_path = root / "projects" / "catalog.json"
           if catalog_path.exists():
@@ -115,7 +138,7 @@ jobs:
             "summary": "WiFi-hosted inventory system for the LILYGO T-Dongle S3 with SD-backed storage, QR item pages, Google backup hooks, and onboard status notifications.",
             "version": version,
             "updated": updated,
-            "manifest": f"projects/{project_id}/manifest.json",
+            "manifest": f"projects/{project_id}/{manifest_file}",
             "notes": [
               "Use Chrome or Microsoft Edge on a desktop or laptop.",
               "Use a USB data cable and close any serial monitor before flashing.",
