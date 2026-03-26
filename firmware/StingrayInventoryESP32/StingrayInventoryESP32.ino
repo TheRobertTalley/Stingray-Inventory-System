@@ -2744,7 +2744,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     }
 
     async function scanWifiNetworks() {
-      const data = await readJson('/api/wifi/scan');
+      const data = await readJson(`/api/wifi/scan?ts=${Date.now()}`);
       state.wifiNetworks = Array.isArray(data.networks) ? data.networks : [];
       renderWifiNetworkOptions();
       return state.wifiNetworks;
@@ -8549,7 +8549,26 @@ void handleWifiScan() {
   }
 
   WiFi.scanDelete();
-  const int count = WiFi.scanNetworks(false, true);
+  int count = WiFi.scanNetworks(true, true);
+  if (count == WIFI_SCAN_RUNNING) {
+    const uint32_t scanStartMs = millis();
+    while (count == WIFI_SCAN_RUNNING && millis() - scanStartMs < 15000UL) {
+      delay(100);
+      count = WiFi.scanComplete();
+    }
+  }
+
+  if (count < 0) {
+    WiFi.scanDelete();
+    delay(120);
+    count = WiFi.scanNetworks(false, true);
+  }
+
+  if (count < 0) {
+    WiFi.scanDelete();
+    sendError(503, "Wi-Fi scan failed (" + String(count) + "). Keep AP enabled, move closer to the router, then retry.");
+    return;
+  }
 
   struct ScannedNetwork {
     String ssid;
