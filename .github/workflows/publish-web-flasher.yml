@@ -50,13 +50,6 @@ jobs:
 
           cp "$BOOT_APP0" artifacts/boot_app0.bin
 
-      - name: Validate Web Flasher Token
-        if: ${{ secrets.STINGRAY_WEB_FLASHER_TOKEN == '' }}
-        run: |
-          echo "Missing secret: STINGRAY_WEB_FLASHER_TOKEN"
-          echo "Add a token with write access to TheRobertTalley/Stingray-Web-Flasher."
-          exit 1
-
       - name: Checkout Web Flasher Repo
         uses: actions/checkout@v4
         with:
