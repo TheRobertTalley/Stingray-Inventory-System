@@ -85,6 +85,27 @@ pio run -e t-dongle-s3
 pio run -e t-dongle-s3 --target upload
 ```
 
+## Auto-Publish To Web Flasher
+
+This repo now includes GitHub Actions automation at:
+
+- `.github/workflows/publish-web-flasher.yml`
+
+Behavior:
+
+- On every push to `main`, CI builds `t-dongle-s3` firmware binaries.
+- It updates `projects/stingray-inventory-system/` and `projects/catalog.json` in:
+  - `https://github.com/TheRobertTalley/Stingray-Web-Flasher`
+- That automatically keeps:
+  - `https://theroberttalley.github.io/Stingray-Web-Flasher/`
+  current with the latest firmware build.
+
+Required one-time setup in this repo (`Settings -> Secrets and variables -> Actions`):
+
+- Add secret `STINGRAY_WEB_FLASHER_TOKEN`
+- Use a GitHub token that has write access to:
+  - `TheRobertTalley/Stingray-Web-Flasher`
+
 ## First Boot Behavior
 
 On startup, the firmware:

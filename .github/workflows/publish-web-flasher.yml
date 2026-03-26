@@ -1,0 +1,160 @@
+name: Publish Stingray Inventory To Web Flasher
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Inventory Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade pip platformio
+
+      - name: Build T-Dongle S3 Firmware (No Upload)
+        run: pio run -e t-dongle-s3 -t buildprog
+
+      - name: Collect Flash Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp .pio/build/t-dongle-s3/bootloader.bin artifacts/bootloader.bin
+          cp .pio/build/t-dongle-s3/partitions.bin artifacts/partitions.bin
+          cp .pio/build/t-dongle-s3/firmware.bin artifacts/firmware.bin
+
+          BOOT_APP0="$(python - <<'PY'
+          import glob
+          import os
+
+          candidates = glob.glob(os.path.expanduser("~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"))
+          if not candidates:
+              raise SystemExit("boot_app0.bin not found in PlatformIO framework package.")
+          print(candidates[0])
+          PY
+          )"
+
+          cp "$BOOT_APP0" artifacts/boot_app0.bin
+
+      - name: Validate Web Flasher Token
+        if: ${{ secrets.STINGRAY_WEB_FLASHER_TOKEN == '' }}
+        run: |
+          echo "Missing secret: STINGRAY_WEB_FLASHER_TOKEN"
+          echo "Add a token with write access to TheRobertTalley/Stingray-Web-Flasher."
+          exit 1
+
+      - name: Checkout Web Flasher Repo
+        uses: actions/checkout@v4
+        with:
+          repository: TheRobertTalley/Stingray-Web-Flasher
+          token: ${{ secrets.STINGRAY_WEB_FLASHER_TOKEN }}
+          path: web-flasher
+
+      - name: Update Manifest And Catalog
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import shutil
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          root = Path("web-flasher")
+          project_id = "stingray-inventory-system"
+          project_dir = root / "projects" / project_id
+          project_dir.mkdir(parents=True, exist_ok=True)
+
+          artifacts = Path("artifacts")
+          for name in ("bootloader.bin", "partitions.bin", "boot_app0.bin", "firmware.bin"):
+            source = artifacts / name
+            if not source.exists():
+              raise SystemExit(f"Missing artifact: {source}")
+            shutil.copy2(source, project_dir / name)
+
+          now = datetime.now(timezone.utc)
+          updated = now.strftime("%Y-%m-%d")
+          version = f"{now.strftime('%Y.%m.%d')}+{os.environ['SOURCE_SHA'][:7]}"
+
+          manifest = {
+            "name": "STINGRAY INVENTORY SYSTEM (T-Dongle S3)",
+            "version": version,
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  {"path": "bootloader.bin", "offset": 0},
+                  {"path": "partitions.bin", "offset": 32768},
+                  {"path": "boot_app0.bin", "offset": 57344},
+                  {"path": "firmware.bin", "offset": 65536},
+                ],
+              }
+            ],
+          }
+          (project_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+          catalog_path = root / "projects" / "catalog.json"
+          if catalog_path.exists():
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+          else:
+            catalog = []
+          if not isinstance(catalog, list):
+            raise SystemExit("projects/catalog.json must be a JSON array.")
+
+          entry = {
+            "id": project_id,
+            "name": "STINGRAY INVENTORY SYSTEM (T-Dongle S3)",
+            "summary": "WiFi-hosted inventory system for the LILYGO T-Dongle S3 with SD-backed storage, QR item pages, Google backup hooks, and onboard status notifications.",
+            "version": version,
+            "updated": updated,
+            "manifest": f"projects/{project_id}/manifest.json",
+            "notes": [
+              "Use Chrome or Microsoft Edge on a desktop or laptop.",
+              "Use a USB data cable and close any serial monitor before flashing.",
+              "Target device: LILYGO T-Dongle S3 with the current inventory firmware build.",
+            ],
+          }
+
+          replaced = False
+          for idx, item in enumerate(catalog):
+            if isinstance(item, dict) and item.get("id") == project_id:
+              catalog[idx] = entry
+              replaced = True
+              break
+          if not replaced:
+            catalog.insert(0, entry)
+
+          catalog_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Commit And Push Web Flasher Update
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd web-flasher
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add projects/stingray-inventory-system projects/catalog.json
+          if git diff --cached --quiet; then
+            echo "No Web Flasher changes detected."
+            exit 0
+          fi
+          git commit -m "Publish Stingray Inventory firmware ${SOURCE_SHA::7}"
+          git push origin main
