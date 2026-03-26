@@ -1,6 +1,7 @@
 #include <FS.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include <esp_err.h>
 #include <esp_system.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -20,6 +21,9 @@
 
 #if defined(STINGRAY_USE_SD_MMC)
 #include <SD_MMC.h>
+#include <driver/sdmmc_defs.h>
+#include <driver/sdmmc_host.h>
+#include <esp_vfs_fat.h>
 #else
 #include <SD.h>
 #endif
@@ -98,6 +102,14 @@
 
 #ifndef STINGRAY_DONGLE_LED_CI
 #define STINGRAY_DONGLE_LED_CI 39
+#endif
+
+#ifndef STINGRAY_SD_MMC_RECOVERY_FREQ_KHZ
+#define STINGRAY_SD_MMC_RECOVERY_FREQ_KHZ 10000
+#endif
+
+#ifndef STINGRAY_SD_SPI_RECOVERY_FREQ_HZ
+#define STINGRAY_SD_SPI_RECOVERY_FREQ_HZ 1000000
 #endif
 
 // -------------------------------
@@ -228,8 +240,13 @@ struct OrderFulfillmentEntry {
 
 std::vector<ItemRecord> g_items;
 bool g_sdReady = false;
+bool g_sdCardPresent = false;
+uint64_t g_sdCardSizeBytes = 0;
+String g_sdMountState = "unknown";
+String g_sdLastError = "";
 String g_baseUrl = "http://0.0.0.0";
 const char* DEFAULT_CATEGORY = "part";
+const char* SD_FORMAT_CONFIRM_PHRASE = "FORMAT SD";
 CloudBackupConfig g_cloudBackupConfig;
 GoogleDriveState g_googleDriveState;
 WifiConfig g_wifiConfig;
@@ -1244,7 +1261,73 @@ fs::FS& storageFs() {
 #endif
 }
 
-bool initStorage() {
+void setSdState(bool ready, bool present, uint64_t cardSizeBytes, const String& mountState, const String& lastError) {
+  g_sdReady = ready;
+  g_sdCardPresent = present;
+  g_sdCardSizeBytes = cardSizeBytes;
+  g_sdMountState = mountState;
+  g_sdLastError = lastError;
+}
+
+#if defined(STINGRAY_USE_SD_MMC)
+uint64_t sdMmcCardSizeBytes(sdmmc_card_t* card) {
+  if (card == nullptr) {
+    return 0;
+  }
+
+  return static_cast<uint64_t>(card->csd.capacity) * card->csd.sector_size;
+}
+
+bool probeSdMmcCardPresence(uint64_t& outCardSizeBytes, String& outDetail) {
+  outCardSizeBytes = 0;
+  outDetail = "";
+
+  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  host.flags = SDMMC_HOST_FLAG_1BIT;
+  host.slot = SDMMC_HOST_SLOT_1;
+  host.max_freq_khz = STINGRAY_SD_MMC_RECOVERY_FREQ_KHZ;
+
+  sdmmc_slot_config_t slotConfig = SDMMC_SLOT_CONFIG_DEFAULT();
+  slotConfig.width = 1;
+  slotConfig.clk = static_cast<gpio_num_t>(digitalPinToGPIONumber(STINGRAY_SD_MMC_CLK));
+  slotConfig.cmd = static_cast<gpio_num_t>(digitalPinToGPIONumber(STINGRAY_SD_MMC_CMD));
+  slotConfig.d0 = static_cast<gpio_num_t>(digitalPinToGPIONumber(STINGRAY_SD_MMC_D0));
+  slotConfig.d1 = GPIO_NUM_NC;
+  slotConfig.d2 = GPIO_NUM_NC;
+  slotConfig.d3 = GPIO_NUM_NC;
+
+  esp_vfs_fat_sdmmc_mount_config_t mountConfig = {
+    .format_if_mount_failed = false,
+    .max_files = 1,
+    .allocation_unit_size = 0
+  };
+
+  sdmmc_card_t* card = nullptr;
+  const char* mountPath = "/sdprobe";
+  const esp_err_t mountResult = esp_vfs_fat_sdmmc_mount(mountPath, &host, &slotConfig, &mountConfig, &card);
+  outDetail = String(esp_err_to_name(mountResult));
+  outCardSizeBytes = sdMmcCardSizeBytes(card);
+
+  if (mountResult == ESP_OK) {
+    if (card != nullptr) {
+      esp_vfs_fat_sdcard_unmount(mountPath, card);
+    }
+    return true;
+  }
+
+  if (card != nullptr) {
+    esp_vfs_fat_sdcard_unmount(mountPath, card);
+  }
+
+  if (mountResult == ESP_FAIL || mountResult == ESP_ERR_INVALID_STATE) {
+    return true;
+  }
+
+  return false;
+}
+#endif
+
+bool initStorage(bool allowFormat = false) {
 #if defined(STINGRAY_USE_SD_MMC)
   Serial.printf("Initializing SD_MMC storage for %s\n", BOARD_NAME);
   Serial.printf("SD_MMC pins CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d\n",
@@ -1264,10 +1347,54 @@ bool initStorage() {
     STINGRAY_SD_MMC_D3
   )) {
     Serial.println("SD_MMC pin assignment failed.");
+    setSdState(false, false, 0, "pin_error", "SD_MMC pin assignment failed.");
     return false;
   }
 
-  return SD_MMC.begin("/sdcard", false, false);
+  if (SD_MMC.begin("/sdcard", false, false)) {
+    setSdState(true, true, SD_MMC.cardSize(), "ready", "");
+    return true;
+  }
+
+  SD_MMC.end();
+  Serial.printf(
+    "SD_MMC mount retry at %d kHz in 1-bit mode\n",
+    STINGRAY_SD_MMC_RECOVERY_FREQ_KHZ
+  );
+  if (SD_MMC.begin("/sdcard", true, false, STINGRAY_SD_MMC_RECOVERY_FREQ_KHZ)) {
+    setSdState(true, true, SD_MMC.cardSize(), "ready_recovery", "");
+    return true;
+  }
+
+#if defined(STINGRAY_USE_SD_MMC)
+  uint64_t probedCardSizeBytes = 0;
+  String probeDetail;
+  const bool cardPresent = probeSdMmcCardPresence(probedCardSizeBytes, probeDetail);
+
+  if (allowFormat) {
+    if (!cardPresent) {
+      setSdState(false, false, 0, "missing", "No SD card detected (" + probeDetail + ").");
+      return false;
+    }
+
+    SD_MMC.end();
+    Serial.println("SD_MMC format requested by user confirmation.");
+    if (SD_MMC.begin("/sdcard", true, true, STINGRAY_SD_MMC_RECOVERY_FREQ_KHZ)) {
+      setSdState(true, true, SD_MMC.cardSize(), "formatted", "");
+      return true;
+    }
+
+    setSdState(false, true, probedCardSizeBytes, "format_failed", "SD card format attempt failed (" + probeDetail + ").");
+    return false;
+  }
+
+  if (cardPresent) {
+    setSdState(false, true, probedCardSizeBytes, "unmounted_detected", "Card detected but filesystem mount failed (" + probeDetail + ").");
+  } else {
+    setSdState(false, false, 0, "missing", "No SD card detected (" + probeDetail + ").");
+  }
+#endif
+  return false;
 #else
   Serial.printf("Initializing SPI SD storage for %s\n", BOARD_NAME);
   Serial.printf("SPI pins SCK=%d MISO=%d MOSI=%d CS=%d\n",
@@ -1282,7 +1409,61 @@ bool initStorage() {
     STINGRAY_SD_SPI_MOSI,
     STINGRAY_SD_SPI_CS
   );
-  return SD.begin(STINGRAY_SD_SPI_CS, SPI);
+  if (SD.begin(STINGRAY_SD_SPI_CS, SPI)) {
+    setSdState(true, true, SD.cardSize(), "ready", "");
+    return true;
+  }
+
+  SD.end();
+  Serial.printf(
+    "SPI SD mount retry at %u Hz\n",
+    (unsigned)STINGRAY_SD_SPI_RECOVERY_FREQ_HZ
+  );
+  if (SD.begin(
+      STINGRAY_SD_SPI_CS,
+      SPI,
+      STINGRAY_SD_SPI_RECOVERY_FREQ_HZ,
+      "/sd",
+      5,
+      false
+    )) {
+    setSdState(true, true, SD.cardSize(), "ready_recovery", "");
+    return true;
+  }
+
+  const uint64_t cardSizeBytes = SD.cardSize();
+  const bool cardPresent = cardSizeBytes > 0;
+
+  if (allowFormat) {
+    if (!cardPresent) {
+      setSdState(false, false, 0, "missing", "No SD card detected.");
+      return false;
+    }
+
+    SD.end();
+    Serial.println("SPI SD format requested by user confirmation.");
+    if (SD.begin(
+        STINGRAY_SD_SPI_CS,
+        SPI,
+        STINGRAY_SD_SPI_RECOVERY_FREQ_HZ,
+        "/sd",
+        5,
+        true
+      )) {
+      setSdState(true, true, SD.cardSize(), "formatted", "");
+      return true;
+    }
+
+    setSdState(false, true, cardSizeBytes, "format_failed", "SD format attempt failed.");
+    return false;
+  }
+
+  if (cardPresent) {
+    setSdState(false, true, cardSizeBytes, "unmounted_detected", "Card detected but filesystem mount failed.");
+  } else {
+    setSdState(false, false, 0, "missing", "No SD card detected.");
+  }
+  return false;
 #endif
 }
 
@@ -2462,7 +2643,16 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           : data.wifi_setup_required
             ? 'setup required'
             : 'offline';
-      hostInfo.textContent = `${state.baseUrl} | Wi-Fi: ${wifiSummary} | SD: ${data.sd_ready ? 'ready' : 'missing'} | Device: ${data.device_id || 'unknown'} | Time: ${data.time_source || 'unknown'}`;
+      const sdSizeBytes = Number(data.sd_card_size_bytes || 0);
+      const sdSizeLabel = Number.isFinite(sdSizeBytes) && sdSizeBytes > 0
+        ? ` ${(sdSizeBytes / 1073741824).toFixed(sdSizeBytes >= 10 * 1073741824 ? 0 : 1)} GB`
+        : '';
+      const sdSummary = data.sd_ready
+        ? 'ready'
+        : data.sd_card_present
+          ? `detected${sdSizeLabel}, needs setup`
+          : 'missing';
+      hostInfo.textContent = `${state.baseUrl} | Wi-Fi: ${wifiSummary} | SD: ${sdSummary} | Device: ${data.device_id || 'unknown'} | Time: ${data.time_source || 'unknown'}`;
       renderBranding({
         brand_name: data.brand_name || 'Stingray Inventory',
         brand_logo_ref: data.brand_logo_ref || '',
@@ -2656,7 +2846,11 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       if (!safeConfig.sd_ready) {
-        lines.push('SD status: missing or failed. Insert a replacement SD card, then reboot to restore files from Google Drive.');
+        lines.push(
+          safeConfig.sd_card_present
+            ? 'SD status: card detected but not mounted. Use the recovery prompt to retry mount or format a new card safely.'
+            : 'SD status: missing. Insert a replacement SD card, then reboot to restore files from Google Drive.'
+        );
       }
 
       googleStatusOutput.textContent = lines.join('\n');
@@ -5690,6 +5884,12 @@ String jsonEscape(const String& value) {
   return out;
 }
 
+String uint64ToString(uint64_t value) {
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "%llu", static_cast<unsigned long long>(value));
+  return String(buffer);
+}
+
 String csvEscape(const String& value) {
   String out = value;
   out.replace("\"", "\"\"");
@@ -5933,6 +6133,16 @@ bool parseIntArg(const char* argName, int32_t& outValue) {
   const long parsed = strtol(raw.c_str(), nullptr, 10);
   outValue = static_cast<int32_t>(parsed);
   return true;
+}
+
+bool parseConfirmArg(const char* argName) {
+  if (!server.hasArg(argName)) {
+    return false;
+  }
+
+  String raw = trimCopy(server.arg(argName));
+  raw.toLowerCase();
+  return raw == "1" || raw == "true" || raw == "yes" || raw == "confirm";
 }
 
 bool parseIntText(const String& rawValue, int32_t& outValue) {
@@ -6689,7 +6899,7 @@ String cloudBackupConfigToJson() {
   json += ",\"last_synced_snapshot_at\":\"" + jsonEscape(g_googleDriveState.lastSyncedSnapshotAt) + "\"";
   json += ",\"local_snapshot_at\":\"" + jsonEscape(g_googleDriveState.localSnapshotAt) + "\"";
   json += ",\"drive_scope\":\"" + jsonEscape(String(GOOGLE_DRIVE_SCOPE)) + "\"";
-  json += ",\"sd_ready\":" + String(g_sdReady ? "true" : "false");
+  appendSdStatusJsonFields(json);
   json += "}";
   return json;
 }
@@ -8201,12 +8411,44 @@ void maybeAutoSyncGoogle(const String& reason) {
   }
 }
 
+void warmStorageAfterMount(bool forceUiRewrite) {
+  saveCloudBackupConfig();
+  saveGoogleDriveState();
+
+  if (!syncUiAssetsToSd(forceUiRewrite)) {
+    Serial.println("Warning: could not sync UI assets to SD.");
+  }
+
+  if (!loadInventory()) {
+    Serial.println("Warning: could not load inventory from SD.");
+  }
+
+  if (!loadCloudBackupConfig()) {
+    Serial.println("Warning: could not load cloud backup config from SD.");
+  }
+
+  loadGoogleDriveState();
+}
+
+void appendSdStatusJsonFields(String& payload) {
+  payload += ",\"sd_ready\":" + String(g_sdReady ? "true" : "false");
+  payload += ",\"sd_card_present\":" + String(g_sdCardPresent ? "true" : "false");
+  payload += ",\"sd_card_size_bytes\":" + uint64ToString(g_sdCardSizeBytes);
+  payload += ",\"sd_mount_state\":\"" + jsonEscape(g_sdMountState) + "\"";
+  payload += ",\"sd_last_error\":\"" + jsonEscape(g_sdLastError) + "\"";
+  payload += ",\"sd_can_format\":" + String((!g_sdReady && g_sdCardPresent) ? "true" : "false");
+}
+
 bool requireSdCard() {
   if (g_sdReady) {
     return true;
   }
 
-  sendError(500, "SD card is not ready.");
+  if (g_sdCardPresent) {
+    sendError(500, "SD card is detected but not mounted.");
+  } else {
+    sendError(500, "SD card is missing.");
+  }
   return false;
 }
 
@@ -8434,13 +8676,51 @@ void sendSdUiUnavailable(const String& title, const String& message) {
   html += escapeForHtml(title);
   html += "</title><style>";
   html += "body{margin:0;font-family:Segoe UI,Tahoma,sans-serif;background:#eef2f4;color:#1b2f3f;padding:1rem;}";
-  html += ".card{max-width:700px;margin:8vh auto 0;background:#fff;border:1px solid #d5dde2;border-radius:16px;padding:1rem 1.1rem;}";
+  html += ".card{max-width:760px;margin:5vh auto 0;background:#fff;border:1px solid #d5dde2;border-radius:16px;padding:1rem 1.1rem;}";
   html += "h1{margin:0 0 .55rem;font-size:1.2rem;}p{margin:.45rem 0;line-height:1.5;color:#526777;word-break:break-word;}";
+  html += ".actions{display:flex;gap:.55rem;flex-wrap:wrap;margin:.8rem 0;}";
+  html += "button{border:1px solid #c5d2db;background:#f1f5f8;color:#1b2f3f;border-radius:10px;padding:.55rem .9rem;font-weight:700;cursor:pointer;}";
+  html += "button.primary{background:#0f766e;color:#fff;border-color:#0f766e;}";
+  html += "button.danger{background:#b91c1c;color:#fff;border-color:#b91c1c;}";
+  html += "button:disabled{opacity:.55;cursor:not-allowed;}";
+  html += ".small{font-size:.9rem;color:#5d7384;}";
+  html += ".detail{white-space:pre-wrap;background:#f8fbfd;border:1px solid #d5dde2;border-radius:10px;padding:.7rem .8rem;color:#334b5c;min-height:3.4rem;}";
   html += "</style></head><body><main class=\"card\"><h1>";
   html += escapeForHtml(title);
   html += "</h1><p>";
   html += escapeForHtml(message);
-  html += "</p><p>Insert a working SD card, then reboot the device.</p></main></body></html>";
+  html += "</p>";
+  html += "<p id=\"sd-summary\" class=\"small\">Checking SD card status...</p>";
+  html += "<div class=\"actions\">";
+  html += "<button id=\"retry-btn\" type=\"button\" class=\"primary\">Retry SD Mount</button>";
+  html += "<button id=\"format-btn\" type=\"button\" class=\"danger\" hidden>Format New SD Card</button>";
+  html += "<button id=\"reload-btn\" type=\"button\">Reload Page</button>";
+  html += "</div>";
+  html += "<div class=\"small\">Formatting is blocked unless you confirm this is a new card and type a safety phrase.</div>";
+  html += "<div id=\"sd-detail\" class=\"detail\">No actions run yet.</div>";
+  html += "<script>";
+  html += "const retryBtn=document.getElementById('retry-btn');";
+  html += "const formatBtn=document.getElementById('format-btn');";
+  html += "const reloadBtn=document.getElementById('reload-btn');";
+  html += "const sdSummary=document.getElementById('sd-summary');";
+  html += "const sdDetail=document.getElementById('sd-detail');";
+  html += "const confirmPhrase='FORMAT SD';";
+  html += "let latestStatus=null;";
+  html += "function cardSizeLabel(bytes){const n=Number(bytes||0);if(!Number.isFinite(n)||n<=0)return '';const gb=n/1073741824;return gb>=10?`${gb.toFixed(0)} GB`:`${gb.toFixed(1)} GB`;}";
+  html += "function setBusy(isBusy){retryBtn.disabled=isBusy;formatBtn.disabled=isBusy;}";
+  html += "function setDetail(text){sdDetail.textContent=String(text||'').trim()||'No details.';}";
+  html += "function summarize(status){if(status.sd_ready)return 'SD mounted and ready.';if(status.sd_card_present){const size=cardSizeLabel(status.sd_card_size_bytes);return `Card detected${size?` (${size})`:''} but not mounted.`;}return 'No SD card detected.';}";
+  html += "async function readStatus(){const response=await fetch('/api/status',{cache:'no-store'});const data=await response.json().catch(()=>({}));if(!response.ok){throw new Error(data.error||`Status failed (${response.status})`);}return data;}";
+  html += "async function refreshStatus(){const status=await readStatus();latestStatus=status;sdSummary.textContent=summarize(status);formatBtn.hidden=!(status.sd_can_format);if(status.sd_ready){setDetail('SD storage is now mounted. Reloading UI...');setTimeout(()=>window.location.reload(),450);return status;}if(status.sd_last_error){setDetail(status.sd_last_error);}return status;}";
+  html += "async function postForm(path,params){const response=await fetch(path,{method:'POST',body:params});const data=await response.json().catch(()=>({}));if(!response.ok){throw new Error(data.error||`Request failed (${response.status})`);}return data;}";
+  html += "async function retryMount(){setBusy(true);try{const data=await postForm('/api/sd/mount',new URLSearchParams());setDetail(data.message||'Mount retry completed.');}catch(error){setDetail(error.message);}finally{setBusy(false);await refreshStatus();}}";
+  html += "async function formatNewCardFlow(skipNewCardConfirm){const status=latestStatus||await refreshStatus();if(status.sd_ready){setDetail('SD is already mounted.');return;}if(!status.sd_card_present){setDetail('No SD card detected. Insert a card first.');return;}if(!skipNewCardConfirm){const isNew=window.confirm('SD card detected but unreadable. Is this a NEW replacement card?');if(!isNew){setDetail('No format performed. Existing card was preserved. Click Retry SD Mount after checking the card on a PC.');return;}}const eraseOk=window.confirm('Formatting will permanently delete all files on this SD card. Continue?');if(!eraseOk){setDetail('Format canceled. No data was changed.');return;}const typed=(window.prompt(`Type ${confirmPhrase} to confirm formatting.`)||'').trim().toUpperCase();if(typed!==confirmPhrase){setDetail('Format canceled. Confirmation phrase did not match.');return;}const params=new URLSearchParams();params.set('confirm_new_card','yes');params.set('confirm_erase','yes');params.set('confirm_phrase',typed);setBusy(true);try{const data=await postForm('/api/sd/format',params);setDetail(data.message||'Format completed.');}catch(error){setDetail(error.message);}finally{setBusy(false);await refreshStatus();}}";
+  html += "retryBtn.addEventListener('click',()=>{retryMount();});";
+  html += "formatBtn.addEventListener('click',()=>{formatNewCardFlow(false);});";
+  html += "reloadBtn.addEventListener('click',()=>window.location.reload());";
+  html += "(async()=>{try{await postForm('/api/sd/mount',new URLSearchParams());}catch(error){}try{const status=await refreshStatus();if(status&&status.sd_can_format&&!sessionStorage.getItem('stingray_sd_prompted')){sessionStorage.setItem('stingray_sd_prompted','1');const isNew=window.confirm('A card is detected but not mounted. Is this a new card to initialize?');if(isNew){formatNewCardFlow(true);}else{setDetail('No format performed. Existing card remains untouched.');}}}catch(error){setDetail(error.message);}})();";
+  html += "</script>";
+  html += "</main></body></html>";
   server.send(503, "text/html; charset=utf-8", html);
 }
 
@@ -8508,7 +8788,86 @@ void handleStatus() {
   payload += ",\"wifi_saved_ssid\":\"" + jsonEscape(g_wifiConfig.ssid) + "\"";
   payload += ",\"wifi_setup_required\":" + String(wifiCredentialsConfigured() ? "false" : "true");
   payload += ",\"wifi_last_error\":\"" + jsonEscape(g_wifiLastError) + "\"";
-  payload += ",\"sd_ready\":" + String(g_sdReady ? "true" : "false");
+  appendSdStatusJsonFields(payload);
+  payload += "}";
+  sendJson(200, payload);
+}
+
+void handleSdMount() {
+  if (g_sdReady) {
+    sendJson(200, "{\"ok\":true,\"message\":\"SD card already mounted.\"}");
+    return;
+  }
+
+  if (!initStorage(false)) {
+    if (g_sdCardPresent) {
+      sendError(409, "SD card detected but filesystem could not be mounted.");
+    } else {
+      sendError(404, "No SD card detected.");
+    }
+    return;
+  }
+
+  warmStorageAfterMount(false);
+  showBoardStatus("SD READY", STORAGE_MODE, "Storage recovered");
+
+  String payload = "{\"ok\":true,\"message\":\"SD card mounted.\"";
+  appendSdStatusJsonFields(payload);
+  payload += "}";
+  sendJson(200, payload);
+}
+
+void handleSdFormat() {
+  if (!parseConfirmArg("confirm_new_card")) {
+    sendError(400, "confirm_new_card is required and must be true/yes.");
+    return;
+  }
+  if (!parseConfirmArg("confirm_erase")) {
+    sendError(400, "confirm_erase is required and must be true/yes.");
+    return;
+  }
+  if (!server.hasArg("confirm_phrase")) {
+    sendError(400, "confirm_phrase is required.");
+    return;
+  }
+
+  String confirmPhrase = trimCopy(server.arg("confirm_phrase"));
+  confirmPhrase.toUpperCase();
+  if (confirmPhrase != String(SD_FORMAT_CONFIRM_PHRASE)) {
+    sendError(400, "Confirmation phrase did not match.");
+    return;
+  }
+
+  if (g_sdReady) {
+    sendError(409, "SD card is already mounted. Refusing to format a mounted card.");
+    return;
+  }
+
+  initStorage(false);
+  if (g_sdReady) {
+    warmStorageAfterMount(false);
+    String alreadyMountedPayload = "{\"ok\":true,\"message\":\"SD card mounted without formatting.\"";
+    appendSdStatusJsonFields(alreadyMountedPayload);
+    alreadyMountedPayload += "}";
+    sendJson(200, alreadyMountedPayload);
+    return;
+  }
+
+  if (!g_sdCardPresent) {
+    sendError(404, "No SD card detected.");
+    return;
+  }
+
+  if (!initStorage(true)) {
+    sendError(500, "SD card format failed. No inventory changes were applied.");
+    return;
+  }
+
+  warmStorageAfterMount(true);
+  showBoardStatus("SD READY", STORAGE_MODE, "Card formatted");
+
+  String payload = "{\"ok\":true,\"message\":\"SD card formatted and mounted.\"";
+  appendSdStatusJsonFields(payload);
   payload += "}";
   sendJson(200, payload);
 }
@@ -9395,6 +9754,8 @@ void setupRoutes() {
   server.on("/qr.svg", HTTP_GET, handleQrSvg);
 
   server.on("/api/status", HTTP_GET, handleStatus);
+  server.on("/api/sd/mount", HTTP_POST, handleSdMount);
+  server.on("/api/sd/format", HTTP_POST, handleSdFormat);
   server.on("/api/wifi/config", HTTP_GET, handleGetWifiConfig);
   server.on("/api/wifi/config", HTTP_POST, handleSaveWifiConfig);
   server.on("/api/wifi/scan", HTTP_GET, handleWifiScan);
@@ -9449,7 +9810,7 @@ void setup() {
     g_googleDriveState = defaultGoogleDriveState();
   }
 
-  g_sdReady = initStorage();
+  g_sdReady = initStorage(false);
   if (g_sdReady) {
     Serial.println("SD card initialized.");
     showBoardStatus("SD READY", STORAGE_MODE, "Storage online");
@@ -9458,28 +9819,21 @@ void setup() {
     }
     appendDeviceLog("info", "boot", "Device boot started.");
     appendDeviceLog("info", "sd_ready", "SD card initialized successfully.");
-    saveCloudBackupConfig();
-    saveGoogleDriveState();
-    if (!syncUiAssetsToSd()) {
-      Serial.println("Warning: could not sync UI assets to SD.");
-      appendDeviceLog("error", "ui_sync_failed", "Could not sync UI assets to SD.");
-    } else {
-      appendDeviceLog("info", "ui_synced", "UI assets synchronized to SD.");
-    }
-    if (!loadInventory()) {
-      Serial.println("Warning: could not load inventory from SD.");
-      appendDeviceLog("error", "inventory_load_failed", "Could not load inventory from SD.");
-    }
-    if (!loadCloudBackupConfig()) {
-      Serial.println("Warning: could not load cloud backup config from SD.");
-      appendDeviceLog("error", "config_load_failed", "Could not load system backup config from SD.");
-    }
-    loadGoogleDriveState();
+    warmStorageAfterMount(false);
+    appendDeviceLog("info", "ui_synced", "UI assets synchronized to SD.");
   } else {
     Serial.println("Warning: SD card init failed.");
-    showBoardStatus("SD MISSING", "Insert SD card", "Cloud restore waits");
+    if (g_sdCardPresent) {
+      showBoardStatus("SD DETECTED", "Mount failed", "Open UI to recover");
+    } else {
+      showBoardStatus("SD MISSING", "Insert SD card", "Cloud restore waits");
+    }
     if (googleAuthorized()) {
-      updateGoogleState("authorized", "sd_missing", "Insert a replacement SD card and reboot to restore from Google Drive.");
+      if (g_sdCardPresent) {
+        updateGoogleState("authorized", "sd_unmounted", "SD card detected but filesystem is unreadable. Use recovery mode to mount or format a new card.");
+      } else {
+        updateGoogleState("authorized", "sd_missing", "Insert a replacement SD card and reboot to restore from Google Drive.");
+      }
     }
   }
 
