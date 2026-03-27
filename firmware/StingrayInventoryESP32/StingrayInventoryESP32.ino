@@ -4169,7 +4169,11 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         wifiScanBtn.addEventListener('click', async () => {
           try {
             const networks = await scanWifiNetworks();
-            setStatus(`Found ${networks.length} Wi-Fi network(s).`, 'ok');
+            if (networks.length === 0) {
+              setStatus('Found 0 Wi-Fi network(s). Keep AP enabled, confirm a 2.4 GHz SSID is nearby, then scan again.', 'error');
+            } else {
+              setStatus(`Found ${networks.length} Wi-Fi network(s).`, 'ok');
+            }
           } catch (error) {
             setStatus(error.message, 'error');
           }
@@ -8538,21 +8542,12 @@ void handleGetWifiConfig() {
   sendJson(200, wifiConfigToJson());
 }
 
-void handleWifiScan() {
-  wifi_mode_t mode = WiFi.getMode();
-  if (mode == WIFI_OFF) {
-    WiFi.mode(WIFI_STA);
-    delay(120);
-  } else if (mode == WIFI_AP) {
-    WiFi.mode(WIFI_AP_STA);
-    delay(120);
-  }
-
+int runWifiScanAttempt(bool passive, uint32_t timeoutMs) {
   WiFi.scanDelete();
-  int count = WiFi.scanNetworks(true, true);
+  int count = WiFi.scanNetworks(true, true, passive, 360);
   if (count == WIFI_SCAN_RUNNING) {
     const uint32_t scanStartMs = millis();
-    while (count == WIFI_SCAN_RUNNING && millis() - scanStartMs < 15000UL) {
+    while (count == WIFI_SCAN_RUNNING && millis() - scanStartMs < timeoutMs) {
       delay(100);
       count = WiFi.scanComplete();
     }
@@ -8561,7 +8556,50 @@ void handleWifiScan() {
   if (count < 0) {
     WiFi.scanDelete();
     delay(120);
-    count = WiFi.scanNetworks(false, true);
+    count = WiFi.scanNetworks(false, true, passive, 360);
+  }
+
+  return count;
+}
+
+void handleWifiScan() {
+  wifi_mode_t mode = WiFi.getMode();
+  const bool apEnabled = (mode == WIFI_AP || mode == WIFI_AP_STA);
+  if (mode == WIFI_OFF) {
+    WiFi.mode(WIFI_STA);
+    delay(120);
+  } else if (mode == WIFI_AP) {
+    WiFi.mode(WIFI_AP_STA);
+    delay(120);
+  }
+
+  WiFi.setSleep(false);
+
+  int count = -1;
+  int attempts = 0;
+
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    attempts = attempt + 1;
+    if (attempt == 1 && WiFi.status() != WL_CONNECTED) {
+      WiFi.disconnect(false, false);
+      delay(140);
+    } else if (attempt == 2) {
+      const wifi_mode_t refreshMode = apEnabled ? WIFI_AP_STA : WIFI_STA;
+      WiFi.mode(refreshMode);
+      delay(180);
+    }
+
+    count = runWifiScanAttempt(false, 15000UL);
+    if (count > 0) {
+      break;
+    }
+
+    if (count == 0) {
+      count = runWifiScanAttempt(true, 17000UL);
+      if (count > 0) {
+        break;
+      }
+    }
   }
 
   if (count < 0) {
@@ -8631,6 +8669,7 @@ void handleWifiScan() {
   }
   payload += "]";
   payload += ",\"current_ssid\":\"" + jsonEscape(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "") + "\"";
+  payload += ",\"scan_attempts\":" + String(attempts);
   payload += "}";
 
   WiFi.scanDelete();
