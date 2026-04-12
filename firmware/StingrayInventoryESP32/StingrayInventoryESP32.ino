@@ -161,6 +161,12 @@ const char* GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 const char* GOOGLE_DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files";
 const char* GOOGLE_MANIFEST_NAME = "stingray_manifest.txt";
 const char* WIFI_FALLBACK_AP_NAME = "Stingray-Inventory";
+const uint8_t WIFI_FALLBACK_AP_CHANNEL = 6;
+const uint8_t WIFI_FALLBACK_AP_MAX_CLIENTS = 6;
+const uint32_t WIFI_LINK_MAINTENANCE_INTERVAL_MS = 2000UL;
+const uint32_t WIFI_LINK_RECONNECT_INTERVAL_MS = 10000UL;
+const uint32_t WIFI_LINK_AP_FAILOVER_DELAY_MS = 20000UL;
+const uint32_t GOOGLE_AUTO_SYNC_COOLDOWN_MS = 90000UL;
 
 WebServer server(80);
 
@@ -264,6 +270,11 @@ bool g_inventoryLoadHealthy = false;
 String g_wifiLastError = "";
 bool g_pendingApShutdown = false;
 uint32_t g_pendingApShutdownAt = 0;
+uint32_t g_lastWifiMaintenanceAt = 0;
+uint32_t g_lastWifiReconnectAttemptAt = 0;
+uint32_t g_wifiDisconnectedSinceAt = 0;
+uint32_t g_lastGoogleAutoSyncAt = 0;
+bool g_wifiWasConnected = false;
 
 #if defined(ARDUINO_DONGLES3)
 SPIClass g_dongleDisplaySpi(HSPI);
@@ -1193,6 +1204,28 @@ String wifiStatusLabel(wl_status_t status) {
   }
 }
 
+int wifiApClientCount() {
+  if (!wifiApActive()) {
+    return 0;
+  }
+  return WiFi.softAPgetStationNum();
+}
+
+void applyWifiPowerProfile() {
+  const bool apActive = wifiApActive();
+  const bool connected = WiFi.status() == WL_CONNECTED;
+
+  // AP service favors low-latency responses for multiple clients. STA mode can save power.
+  WiFi.setSleep(apActive ? false : true);
+  if (apActive) {
+    WiFi.setTxPower(WIFI_POWER_15dBm);
+  } else if (connected) {
+    WiFi.setTxPower(WIFI_POWER_13dBm);
+  } else {
+    WiFi.setTxPower(WIFI_POWER_11dBm);
+  }
+}
+
 String wifiEncryptionLabel(wifi_auth_mode_t mode) {
   switch (mode) {
     case WIFI_AUTH_OPEN:
@@ -1218,7 +1251,10 @@ String wifiEncryptionLabel(wifi_auth_mode_t mode) {
 
 void startAccessPoint() {
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(WIFI_FALLBACK_AP_NAME);
+  if (!WiFi.softAP(WIFI_FALLBACK_AP_NAME, "", WIFI_FALLBACK_AP_CHANNEL, false, WIFI_FALLBACK_AP_MAX_CLIENTS)) {
+    WiFi.softAP(WIFI_FALLBACK_AP_NAME);
+  }
+  applyWifiPowerProfile();
   g_pendingApShutdown = false;
   g_pendingApShutdownAt = 0;
   g_baseUrl = "http://" + WiFi.softAPIP().toString();
@@ -1250,6 +1286,7 @@ void processPendingAccessPointShutdown() {
 
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
+  applyWifiPowerProfile();
   showBoardStatus("WIFI READY", currentNetworkDisplayLine(), "AP off");
 }
 
@@ -2715,6 +2752,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
       if (safeConfig.ap_active) {
         lines.push(`AP Fallback: ${safeConfig.ap_ssid || 'Stingray-Inventory'} ${safeConfig.ap_ip ? `(${safeConfig.ap_ip})` : ''}`.trim());
+        lines.push(`AP Clients: ${Number(safeConfig.ap_clients || 0)}`);
       }
 
       if (safeConfig.last_error) {
@@ -8409,6 +8447,12 @@ void maybeAutoSyncGoogle(const String& reason) {
     return;
   }
 
+  const uint32_t now = millis();
+  if (g_lastGoogleAutoSyncAt != 0 && now - g_lastGoogleAutoSyncAt < GOOGLE_AUTO_SYNC_COOLDOWN_MS) {
+    return;
+  }
+  g_lastGoogleAutoSyncAt = now;
+
   String errorMessage;
   if (!googleReconcileBackup(false, false, errorMessage) && !errorMessage.isEmpty()) {
     appendDeviceLog("warn", "google_sync_skipped", reason + ": " + errorMessage);
@@ -8492,6 +8536,7 @@ bool connectToWifiConfig(const WifiConfig& config, bool preserveAp, unsigned lon
 
   const wifi_mode_t targetMode = preserveAp && wifiApActive() ? WIFI_AP_STA : WIFI_STA;
   WiFi.mode(targetMode);
+  applyWifiPowerProfile();
   delay(120);
   WiFi.begin(config.ssid.c_str(), config.password.c_str());
 
@@ -8505,6 +8550,7 @@ bool connectToWifiConfig(const WifiConfig& config, bool preserveAp, unsigned lon
 
   if (WiFi.status() == WL_CONNECTED) {
     g_wifiLastError = "";
+    applyWifiPowerProfile();
     updateWifiConnectionContext();
     return true;
   }
@@ -8532,6 +8578,7 @@ String wifiConfigToJson() {
   payload += ",\"ap_active\":" + String(apActive ? "true" : "false");
   payload += ",\"ap_ssid\":\"" + jsonEscape(apActive ? String(WIFI_FALLBACK_AP_NAME) : "") + "\"";
   payload += ",\"ap_ip\":\"" + jsonEscape(apActive ? WiFi.softAPIP().toString() : "") + "\"";
+  payload += ",\"ap_clients\":" + String(apActive ? wifiApClientCount() : 0);
   payload += ",\"last_error\":\"" + jsonEscape(g_wifiLastError) + "\"";
   payload += ",\"setup_required\":" + String(wifiCredentialsConfigured() ? "false" : "true");
   payload += "}";
@@ -8604,6 +8651,7 @@ void handleWifiScan() {
 
   if (count < 0) {
     WiFi.scanDelete();
+    applyWifiPowerProfile();
     sendError(503, "Wi-Fi scan failed (" + String(count) + "). Keep AP enabled, move closer to the router, then retry.");
     return;
   }
@@ -8673,6 +8721,7 @@ void handleWifiScan() {
   payload += "}";
 
   WiFi.scanDelete();
+  applyWifiPowerProfile();
   sendJson(200, payload);
 }
 
@@ -8842,6 +8891,7 @@ void handleStatus() {
   payload += ",\"wifi_mode\":\"" + jsonEscape(wifiModeLabel()) + "\"";
   payload += ",\"wifi_ap_active\":" + String(apActive ? "true" : "false");
   payload += ",\"wifi_ap_ssid\":\"" + jsonEscape(apActive ? String(WIFI_FALLBACK_AP_NAME) : "") + "\"";
+  payload += ",\"wifi_ap_clients\":" + String(apActive ? wifiApClientCount() : 0);
   payload += ",\"wifi_config_source\":\"" + jsonEscape(wifiConfigSource()) + "\"";
   payload += ",\"wifi_saved_ssid\":\"" + jsonEscape(g_wifiConfig.ssid) + "\"";
   payload += ",\"wifi_setup_required\":" + String(wifiCredentialsConfigured() ? "false" : "true");
@@ -9802,6 +9852,78 @@ void connectWifi() {
   appendTimeLog("clock_offline", "Using uptime-based timestamps because WiFi did not connect.");
 }
 
+void maintainWifiLink() {
+  const uint32_t now = millis();
+  if (now - g_lastWifiMaintenanceAt < WIFI_LINK_MAINTENANCE_INTERVAL_MS) {
+    return;
+  }
+  g_lastWifiMaintenanceAt = now;
+
+  const wl_status_t status = WiFi.status();
+  const bool connected = status == WL_CONNECTED;
+  const bool apActive = wifiApActive();
+
+  if (connected) {
+    if (!g_wifiWasConnected) {
+      g_wifiLastError = "";
+      updateWifiConnectionContext();
+      appendDeviceLog("info", "wifi_recovered", "WiFi link recovered at " + g_baseUrl);
+      showBoardStatus("WIFI READY", currentNetworkDisplayLine(), "Link restored");
+    }
+    g_wifiWasConnected = true;
+    g_wifiDisconnectedSinceAt = 0;
+    g_lastWifiReconnectAttemptAt = 0;
+    applyWifiPowerProfile();
+    if (apActive && !g_pendingApShutdown) {
+      scheduleAccessPointShutdown(12000UL);
+    }
+    return;
+  }
+
+  if (g_wifiWasConnected) {
+    g_wifiLastError = "Link dropped (" + wifiStatusLabel(status) + ").";
+    appendDeviceLog("warn", "wifi_lost", g_wifiLastError);
+    showBoardStatus("WIFI LOST", wifiStatusLabel(status), "Reconnecting...");
+  }
+  g_wifiWasConnected = false;
+
+  if (!wifiCredentialsConfigured()) {
+    if (!apActive) {
+      startAccessPoint();
+      showBoardStatus("AP MODE", "WiFi creds missing", g_baseUrl);
+    }
+    return;
+  }
+
+  if (g_wifiDisconnectedSinceAt == 0) {
+    g_wifiDisconnectedSinceAt = now;
+  }
+
+  if (!apActive && now - g_wifiDisconnectedSinceAt >= WIFI_LINK_AP_FAILOVER_DELAY_MS) {
+    startAccessPoint();
+    appendDeviceLog("warn", "wifi_ap_fallback", "WiFi dropped; AP fallback enabled for local access.");
+    showBoardStatus("AP MODE", "WiFi dropped", g_baseUrl);
+  }
+
+  if (g_lastWifiReconnectAttemptAt != 0 && now - g_lastWifiReconnectAttemptAt < WIFI_LINK_RECONNECT_INTERVAL_MS) {
+    return;
+  }
+  g_lastWifiReconnectAttemptAt = now;
+
+  const WifiConfig config = effectiveWifiConfig();
+  if (!wifiConfigUsable(config)) {
+    return;
+  }
+
+  const wifi_mode_t targetMode = wifiApActive() ? WIFI_AP_STA : WIFI_STA;
+  if (WiFi.getMode() != targetMode) {
+    WiFi.mode(targetMode);
+  }
+  applyWifiPowerProfile();
+  WiFi.begin(config.ssid.c_str(), config.password.c_str());
+  g_wifiLastError = "Reconnecting to \"" + config.ssid + "\"...";
+}
+
 void setupRoutes() {
   server.on("/", HTTP_GET, handleIndexPage);
   server.on("/settings", HTTP_GET, handleIndexPage);
@@ -9897,6 +10019,9 @@ void setup() {
 
   enforceStandaloneSdBaseline();
   connectWifi();
+  g_wifiWasConnected = WiFi.status() == WL_CONNECTED;
+  g_wifiDisconnectedSinceAt = g_wifiWasConnected ? 0 : millis();
+  applyWifiPowerProfile();
   if (googleCloudRequested() && googleCredentialsConfigured() && googleAuthorized() && wifiConnectedForCloud()) {
     String errorMessage;
     if (!googleReconcileBackup(false, false, errorMessage) && !errorMessage.isEmpty()) {
@@ -9912,7 +10037,9 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  server.handleClient();
+  maintainWifiLink();
   processPendingAccessPointShutdown();
   updateBoardFeedback();
-  delay(2);
+  delay(1);
 }
