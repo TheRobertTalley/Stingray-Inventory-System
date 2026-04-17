@@ -89,6 +89,8 @@ By default, install creates:
 - Install directory: `C:\Program Files\StingrayInventoryDesktop`
 - Data directory: `C:\ProgramData\StingrayInventoryDesktop\data`
 - Start Menu shortcut: `Stingray Inventory Desktop`
+- Start Menu shortcut: `Stop Stingray Inventory Desktop`
+- Start Menu shortcut: `Uninstall Stingray Inventory Desktop`
 - Desktop shortcut: `Stingray Inventory Desktop`
 - SYSTEM startup task: `Stingray Inventory Desktop (System Startup)` (starts before login)
 
@@ -100,6 +102,45 @@ Important:
 Installer zip output:
 
 - `dist\StingrayInventoryDesktop-Installer.zip`
+
+## Stop / Disable For Development
+
+Use either:
+
+- Start Menu: `Stop Stingray Inventory Desktop`
+- Or in the install folder: `stop_desktop_app.cmd`
+
+Default behavior:
+
+- Stops all running app processes
+- Stops supervisor process
+- Disables system startup task so it stays off
+
+To stop but keep autostart enabled:
+
+```powershell
+.\stop_desktop_app.ps1 -KeepAutoStart
+```
+
+## Uninstall
+
+Use either:
+
+- Start Menu: `Uninstall Stingray Inventory Desktop`
+- Or in the install folder: `uninstall_desktop_app.cmd`
+
+Default behavior:
+
+- Stops app
+- Removes startup task and shortcuts
+- Removes app files
+- Keeps data at `C:\ProgramData\StingrayInventoryDesktop\data`
+
+To also remove data:
+
+```powershell
+.\uninstall_desktop_app.ps1 -RemoveData
+```
 
 ## Smoke Test
 

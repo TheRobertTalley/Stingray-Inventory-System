@@ -125,6 +125,11 @@ endlocal
 "@
 Set-Content -LiteralPath $runnerCmdPath -Value $runnerContent -Encoding ASCII
 
+Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.ps1") -Destination (Join-Path $appDistDir "stop_desktop_app.ps1") -Force
+Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.ps1") -Destination (Join-Path $appDistDir "uninstall_desktop_app.ps1") -Force
+Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.cmd") -Destination (Join-Path $appDistDir "stop_desktop_app.cmd") -Force
+Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.cmd") -Destination (Join-Path $appDistDir "uninstall_desktop_app.cmd") -Force
+
 if (Test-Path $bundledBrandLogo) {
   $appBrandingDir = Join-Path $appDistDir "branding"
   New-Item -ItemType Directory -Force -Path $appBrandingDir | Out-Null
@@ -137,6 +142,10 @@ New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
 Copy-Item -Path $appDistDir -Destination (Join-Path $bundleDir "StingrayInventoryDesktop") -Recurse -Force
 Copy-Item -Path (Join-Path $scriptDir "install_desktop_app.ps1") -Destination (Join-Path $bundleDir "install_desktop_app.ps1") -Force
 Copy-Item -Path (Join-Path $scriptDir "install_desktop_app.cmd") -Destination (Join-Path $bundleDir "Install Stingray Inventory Desktop.cmd") -Force
+Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.ps1") -Destination (Join-Path $bundleDir "stop_desktop_app.ps1") -Force
+Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.ps1") -Destination (Join-Path $bundleDir "uninstall_desktop_app.ps1") -Force
+Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.cmd") -Destination (Join-Path $bundleDir "Stop Stingray Inventory Desktop.cmd") -Force
+Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.cmd") -Destination (Join-Path $bundleDir "Uninstall Stingray Inventory Desktop.cmd") -Force
 Copy-Item -Path (Join-Path $scriptDir "README.md") -Destination (Join-Path $bundleDir "README.md") -Force
 
 $zipPath = Join-Path $distDir "StingrayInventoryDesktop-Installer.zip"

@@ -43,6 +43,8 @@ You can now run Stingray Inventory directly on Windows while preserving existing
 - One-command setup/run on Windows: `desktop_app/install_and_run.ps1`
 - Build standalone desktop installer bundle: `desktop_app/build_installer.ps1`
 - Install built desktop app on a PC: `desktop_app/install_desktop_app.ps1`
+- Stop desktop app + disable autostart: `desktop_app/stop_desktop_app.ps1`
+- Uninstall desktop app: `desktop_app/uninstall_desktop_app.ps1`
 - Desktop notes: `desktop_app/README.md`
 - Desktop installer now supports default branding + desktop shortcut + system startup task (before login).
 - Installer ZIP includes one-click setup (`Install Stingray Inventory Desktop.cmd`) that prompts for UAC and configures startup correctly.

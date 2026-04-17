@@ -273,6 +273,28 @@ $manualShortcut.IconLocation = $shortcutIcon
 $manualShortcut.Description = "Start Stingray Inventory desktop app and open browser"
 $manualShortcut.Save()
 
+$powershellExe = Resolve-PowerShellExe
+
+$stopScriptPath = Join-Path $InstallDir "stop_desktop_app.ps1"
+$stopShortcutPath = Join-Path $startMenuDir "Stop Stingray Inventory Desktop.lnk"
+$stopShortcut = $wsh.CreateShortcut($stopShortcutPath)
+$stopShortcut.TargetPath = $powershellExe
+$stopShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$stopScriptPath`" -SystemTaskName `"$SystemTaskName`""
+$stopShortcut.WorkingDirectory = $InstallDir
+$stopShortcut.IconLocation = $shortcutIcon
+$stopShortcut.Description = "Stop Stingray Inventory and disable startup task"
+$stopShortcut.Save()
+
+$uninstallScriptPath = Join-Path $InstallDir "uninstall_desktop_app.ps1"
+$uninstallShortcutPath = Join-Path $startMenuDir "Uninstall Stingray Inventory Desktop.lnk"
+$uninstallShortcut = $wsh.CreateShortcut($uninstallShortcutPath)
+$uninstallShortcut.TargetPath = $powershellExe
+$uninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$uninstallScriptPath`" -InstallDir `"$InstallDir`" -DataDir `"$DataDir`" -SystemTaskName `"$SystemTaskName`""
+$uninstallShortcut.WorkingDirectory = $InstallDir
+$uninstallShortcut.IconLocation = $shortcutIcon
+$uninstallShortcut.Description = "Uninstall Stingray Inventory Desktop (keeps data by default)"
+$uninstallShortcut.Save()
+
 $desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Stingray Inventory Desktop.lnk"
 if (-not $NoDesktopShortcut) {
   $desktopShortcut = $wsh.CreateShortcut($desktopShortcutPath)
@@ -283,7 +305,6 @@ if (-not $NoDesktopShortcut) {
   $desktopShortcut.Save()
 }
 
-$powershellExe = Resolve-PowerShellExe
 $legacyStartupShortcutPaths = @(
   (Join-Path ([Environment]::GetFolderPath("Startup")) "Stingray Inventory Desktop Background.lnk"),
   (Join-Path ([Environment]::GetFolderPath("CommonStartup")) "Stingray Inventory Desktop Background.lnk")
@@ -342,6 +363,8 @@ if ($brandLogoRef) {
 }
 Write-Host "Start Menu shortcut: $startShortcutPath"
 Write-Host "Manual Start shortcut: $manualShortcutPath"
+Write-Host "Stop shortcut: $stopShortcutPath"
+Write-Host "Uninstall shortcut: $uninstallShortcutPath"
 if (-not $NoDesktopShortcut) {
   Write-Host "Desktop shortcut: $desktopShortcutPath"
 }
