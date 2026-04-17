@@ -30,9 +30,22 @@ Stingray Inventory System is now an ESP32-hosted inventory app.
 ## Repository Layout
 
 - `firmware/StingrayInventoryESP32/StingrayInventoryESP32.ino`: complete ESP32 firmware
+- `desktop_app/`: native PC-hosted Stingray desktop service (same inventory file compatibility)
 - `platformio.ini`: optional PlatformIO environment
 - `LICENSE`
 - `README.md`
+
+## Desktop PC Migration (New)
+
+You can now run Stingray Inventory directly on Windows while preserving existing SD data formats.
+
+- Desktop entry point: `desktop_app/stingray_desktop_app.py`
+- One-command setup/run on Windows: `desktop_app/install_and_run.ps1`
+- Build standalone desktop installer bundle: `desktop_app/build_installer.ps1`
+- Install built desktop app on a PC: `desktop_app/install_desktop_app.ps1`
+- Desktop notes: `desktop_app/README.md`
+- Desktop installer now supports default branding + desktop shortcut + system startup task (before login).
+- Installer ZIP includes one-click setup (`Install Stingray Inventory Desktop.cmd`) that prompts for UAC and configures startup correctly.
 
 ## Hardware
 
@@ -94,11 +107,12 @@ This repo now includes GitHub Actions automation at:
 Behavior:
 
 - On every push to `main`, CI builds `t-dongle-s3` firmware binaries.
+- CI also builds the Windows desktop installer zip (`StingrayInventoryDesktop-Installer.zip`).
 - It updates `projects/stingray-inventory-system/` and `projects/catalog.json` in:
   - `https://github.com/TheRobertTalley/Stingray-Web-Flasher`
 - That automatically keeps:
   - `https://theroberttalley.github.io/Stingray-Web-Flasher/`
-  current with the latest firmware build.
+  current with the latest firmware build and desktop installer download card.
 
 Required one-time setup in this repo (`Settings -> Secrets and variables -> Actions`):
 

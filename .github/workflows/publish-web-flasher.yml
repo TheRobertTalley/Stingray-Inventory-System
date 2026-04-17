@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  build-firmware:
     runs-on: ubuntu-latest
 
     steps:
@@ -28,14 +28,14 @@ jobs:
       - name: Build T-Dongle S3 Firmware (No Upload)
         run: pio run -e t-dongle-s3 -t buildprog
 
-      - name: Collect Flash Artifacts
+      - name: Collect Firmware Artifacts
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts
-          cp .pio/build/t-dongle-s3/bootloader.bin artifacts/bootloader.bin
-          cp .pio/build/t-dongle-s3/partitions.bin artifacts/partitions.bin
-          cp .pio/build/t-dongle-s3/firmware.bin artifacts/firmware.bin
+          mkdir -p artifacts/firmware
+          cp .pio/build/t-dongle-s3/bootloader.bin artifacts/firmware/bootloader.bin
+          cp .pio/build/t-dongle-s3/partitions.bin artifacts/firmware/partitions.bin
+          cp .pio/build/t-dongle-s3/firmware.bin artifacts/firmware/firmware.bin
 
           BOOT_APP0="$(python - <<'PY'
           import glob
@@ -48,7 +48,60 @@ jobs:
           PY
           )"
 
-          cp "$BOOT_APP0" artifacts/boot_app0.bin
+          cp "$BOOT_APP0" artifacts/firmware/boot_app0.bin
+
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-binaries
+          path: artifacts/firmware/*
+          if-no-files-found: error
+
+  build-desktop-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Inventory Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Desktop Installer ZIP
+        shell: powershell
+        run: |
+          .\desktop_app\build_installer.ps1 -BrandName "Stingray Airsoft"
+          if (-not (Test-Path ".\dist\StingrayInventoryDesktop-Installer.zip")) {
+            throw "Desktop installer zip not produced."
+          }
+
+      - name: Upload Desktop Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-installer
+          path: dist/StingrayInventoryDesktop-Installer.zip
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - build-firmware
+      - build-desktop-installer
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Firmware Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-binaries
+          path: artifacts/firmware
+
+      - name: Download Desktop Installer Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-installer
+          path: artifacts/desktop
 
       - name: Checkout Web Flasher Repo
         uses: actions/checkout@v4
@@ -57,30 +110,32 @@ jobs:
           token: ${{ secrets.STINGRAY_WEB_FLASHER_TOKEN }}
           path: web-flasher
 
-      - name: Update Manifest And Catalog
+      - name: Update Manifest, Catalog, And UI
         env:
           SOURCE_SHA: ${{ github.sha }}
         run: |
           python - <<'PY'
           import json
           import os
+          import re
           import shutil
           from datetime import datetime, timezone
           from pathlib import Path
 
           root = Path("web-flasher")
           project_id = "stingray-inventory-system"
+          desktop_id = "stingray-inventory-desktop-installer"
           project_dir = root / "projects" / project_id
           project_dir.mkdir(parents=True, exist_ok=True)
           short_sha = os.environ["SOURCE_SHA"][:7]
 
-          # Remove previous versioned artifacts so only the latest commit artifacts remain.
           for pattern in (
             "bootloader-*.bin",
             "partitions-*.bin",
             "boot_app0-*.bin",
             "firmware-*.bin",
             "manifest-*.json",
+            "StingrayInventoryDesktop-Installer-*.zip",
           ):
             for stale in project_dir.glob(pattern):
               stale.unlink()
@@ -90,20 +145,26 @@ jobs:
             "partitions.bin": f"partitions-{short_sha}.bin",
             "boot_app0.bin": f"boot_app0-{short_sha}.bin",
             "firmware.bin": f"firmware-{short_sha}.bin",
+            "desktop_installer.zip": f"StingrayInventoryDesktop-Installer-{short_sha}.zip",
           }
 
-          artifacts = Path("artifacts")
+          firmware_artifacts = Path("artifacts/firmware")
           for name in ("bootloader.bin", "partitions.bin", "boot_app0.bin", "firmware.bin"):
-            source = artifacts / name
+            source = firmware_artifacts / name
             if not source.exists():
-              raise SystemExit(f"Missing artifact: {source}")
-            # Keep canonical names for convenience/debug and publish versioned names for cache busting.
+              raise SystemExit(f"Missing firmware artifact: {source}")
             shutil.copy2(source, project_dir / name)
             shutil.copy2(source, project_dir / versioned_names[name])
 
+          installer_source = Path("artifacts/desktop/StingrayInventoryDesktop-Installer.zip")
+          if not installer_source.exists():
+            raise SystemExit(f"Missing desktop installer artifact: {installer_source}")
+          shutil.copy2(installer_source, project_dir / "StingrayInventoryDesktop-Installer.zip")
+          shutil.copy2(installer_source, project_dir / versioned_names["desktop_installer.zip"])
+
           now = datetime.now(timezone.utc)
           updated = now.strftime("%Y-%m-%d")
-          version = f"{now.strftime('%Y.%m.%d')}+{os.environ['SOURCE_SHA'][:7]}"
+          version = f"{now.strftime('%Y.%m.%d')}+{short_sha}"
           manifest_file = f"manifest-{short_sha}.json"
 
           manifest = {
@@ -132,7 +193,7 @@ jobs:
           if not isinstance(catalog, list):
             raise SystemExit("projects/catalog.json must be a JSON array.")
 
-          entry = {
+          firmware_entry = {
             "id": project_id,
             "name": "STINGRAY INVENTORY SYSTEM (T-Dongle S3)",
             "summary": "WiFi-hosted inventory system for the LILYGO T-Dongle S3 with SD-backed storage, QR item pages, Google backup hooks, and onboard status notifications.",
@@ -146,16 +207,88 @@ jobs:
             ],
           }
 
-          replaced = False
-          for idx, item in enumerate(catalog):
-            if isinstance(item, dict) and item.get("id") == project_id:
-              catalog[idx] = entry
-              replaced = True
-              break
-          if not replaced:
-            catalog.insert(0, entry)
+          desktop_entry = {
+            "id": desktop_id,
+            "name": "STINGRAY INVENTORY DESKTOP (Windows Installer)",
+            "summary": "Native Windows installer for Stingray Inventory with SD-compatible data files, desktop/startup integration, and branded shortcuts.",
+            "version": version,
+            "updated": updated,
+            "download_url": f"projects/{project_id}/{versioned_names['desktop_installer.zip']}",
+            "download_label": "Download installer (.zip)",
+            "download_name": "StingrayInventoryDesktop-Installer.zip",
+            "notes": [
+              "Extract the zip and run: Install Stingray Inventory Desktop.cmd",
+              "Windows will prompt for Administrator approval (UAC).",
+              "Installs as a system startup task so it runs before login.",
+            ],
+          }
 
+          keep_ids = {project_id, desktop_id}
+          filtered = [entry for entry in catalog if not (isinstance(entry, dict) and entry.get("id") in keep_ids)]
+          catalog = [firmware_entry, desktop_entry] + filtered
           catalog_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+
+          index_path = root / "index.html"
+          index_html = index_path.read_text(encoding="utf-8")
+
+          if 'data-download-link' not in index_html:
+            marker = '<a data-manifest-link target="_blank" rel="noreferrer">View manifest</a>'
+            replacement = marker + '\n          <a data-download-link target="_blank" rel="noreferrer" hidden>Download</a>'
+            if marker not in index_html:
+              raise SystemExit("Unable to patch index.html download link anchor marker.")
+            index_html = index_html.replace(marker, replacement, 1)
+
+          render_pattern = re.compile(
+            r'const installHost = card\.querySelector\("\[data-install\]"\);\s+'
+            r'const installButton = document\.createElement\("esp-web-install-button"\);\s+'
+            r'installButton\.setAttribute\("manifest", project\.manifest\);\s+'
+            r'installHost\.appendChild\(installButton\);\s+'
+            r'const manifestLink = card\.querySelector\("\[data-manifest-link\]"\);\s+'
+            r'manifestLink\.href = project\.manifest;',
+            re.S,
+          )
+
+          new_block = """const installHost = card.querySelector("[data-install]");
+          const manifestLink = card.querySelector("[data-manifest-link]");
+          const manifestPath = typeof project.manifest === "string" ? project.manifest.trim() : "";
+          if (manifestPath) {
+            const installButton = document.createElement("esp-web-install-button");
+            installButton.setAttribute("manifest", manifestPath);
+            installHost.appendChild(installButton);
+            manifestLink.href = manifestPath;
+            manifestLink.hidden = false;
+          } else {
+            installHost.replaceChildren();
+            manifestLink.hidden = true;
+            manifestLink.removeAttribute("href");
+          }
+
+          const downloadLink = card.querySelector("[data-download-link]");
+          const downloadUrl = typeof project.download_url === "string" ? project.download_url.trim() : "";
+          if (downloadUrl) {
+            downloadLink.href = downloadUrl;
+            downloadLink.textContent = (typeof project.download_label === "string" && project.download_label.trim())
+              ? project.download_label.trim()
+              : "Download";
+            const downloadName = typeof project.download_name === "string" ? project.download_name.trim() : "";
+            if (downloadName) {
+              downloadLink.setAttribute("download", downloadName);
+            } else {
+              downloadLink.removeAttribute("download");
+            }
+            downloadLink.hidden = false;
+          } else {
+            downloadLink.hidden = true;
+            downloadLink.removeAttribute("href");
+            downloadLink.removeAttribute("download");
+          }"""
+
+          if render_pattern.search(index_html):
+            index_html = render_pattern.sub(new_block, index_html, count=1)
+          elif 'const downloadLink = card.querySelector("[data-download-link]");' not in index_html:
+            raise SystemExit("Unable to patch index.html render block for downloads.")
+
+          index_path.write_text(index_html, encoding="utf-8")
           PY
 
       - name: Commit And Push Web Flasher Update
@@ -167,10 +300,10 @@ jobs:
           cd web-flasher
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add projects/stingray-inventory-system projects/catalog.json
+          git add index.html projects/stingray-inventory-system projects/catalog.json
           if git diff --cached --quiet; then
             echo "No Web Flasher changes detected."
             exit 0
           fi
-          git commit -m "Publish Stingray Inventory firmware ${SOURCE_SHA::7}"
+          git commit -m "Publish Stingray firmware + desktop installer ${SOURCE_SHA::7}"
           git push origin main
