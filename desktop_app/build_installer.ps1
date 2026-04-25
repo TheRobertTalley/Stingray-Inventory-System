@@ -73,8 +73,8 @@ if (-not (Test-Path $pythonExe)) {
 }
 
 & $pythonExe -m pip install --upgrade pip
-& $pythonExe -m pip install -r (Join-Path $scriptDir "requirements.txt")
-& $pythonExe -m pip install pyinstaller==6.15.0
+& $pythonExe -m pip install --upgrade --upgrade-strategy eager -r (Join-Path $scriptDir "requirements.txt")
+& $pythonExe -m pip install --upgrade pyinstaller
 
 if (Test-Path $BrandLogoPath) {
   New-Item -ItemType Directory -Force -Path $brandingDir | Out-Null
@@ -119,7 +119,7 @@ set APPDIR=%~dp0
 set URL=http://127.0.0.1:$Port/
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri '%URL%api/status' -UseBasicParsing -TimeoutSec 2 | Out-Null; Start-Process '%URL%'; exit 0 } catch { exit 1 }"
 if %ERRORLEVEL% EQU 0 goto :done
-"%APPDIR%StingrayInventoryDesktop.exe" --host 127.0.0.1 --port $Port --data-dir "$DataDir" --open-browser
+"%APPDIR%StingrayInventoryDesktop.exe" --host 0.0.0.0 --port $Port --data-dir "$DataDir" --open-browser
 :done
 endlocal
 "@

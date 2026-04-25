@@ -2,6 +2,7 @@ param(
   [string]$InstallDir = "$env:ProgramFiles\\StingrayInventoryDesktop",
   [string]$DataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data",
   [string]$SystemTaskName = "Stingray Inventory Desktop (System Startup)",
+  [string]$FirewallRuleName = "Stingray Inventory Desktop LAN",
   [switch]$RemoveData
 )
 
@@ -29,7 +30,8 @@ if (-not (Test-IsAdministrator)) {
     "-File", $PSCommandPath,
     "-InstallDir", $InstallDir,
     "-DataDir", $DataDir,
-    "-SystemTaskName", $SystemTaskName
+    "-SystemTaskName", $SystemTaskName,
+    "-FirewallRuleName", $FirewallRuleName
   )
   if ($RemoveData) { $elevatedArgs += "-RemoveData" }
 
@@ -59,6 +61,11 @@ if (Test-Path $stopScript) {
 $taskToDelete = Get-ScheduledTask -TaskName $SystemTaskName -ErrorAction SilentlyContinue
 if ($taskToDelete) {
   Unregister-ScheduledTask -TaskName $SystemTaskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+$firewallRule = Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
+if ($firewallRule) {
+  Remove-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
 }
 
 $startMenuDir = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Stingray Inventory Desktop"

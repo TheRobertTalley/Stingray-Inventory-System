@@ -1,7 +1,7 @@
 param(
-  [string]$HostIp = "127.0.0.1",
+  [string]$HostIp = "0.0.0.0",
   [int]$Port = 8787,
-  [string]$DataDir = "$HOME\\StingrayInventoryDesktop\\data"
+  [string]$DataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data"
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +16,7 @@ if (-not (Test-Path $pythonExe)) {
 
 try {
   & $pythonExe -m pip install --upgrade pip
-  & $pythonExe -m pip install -r (Join-Path $scriptDir "requirements.txt")
+  & $pythonExe -m pip install --upgrade --upgrade-strategy eager -r (Join-Path $scriptDir "requirements.txt")
 } catch {
   Write-Host "Recreating virtual environment after install failure..."
   if (Test-Path $venvDir) {
@@ -24,7 +24,7 @@ try {
   }
   python -m venv $venvDir
   & $pythonExe -m pip install --upgrade pip
-  & $pythonExe -m pip install -r (Join-Path $scriptDir "requirements.txt")
+  & $pythonExe -m pip install --upgrade --upgrade-strategy eager -r (Join-Path $scriptDir "requirements.txt")
 }
 
 & $pythonExe (Join-Path $scriptDir "stingray_desktop_app.py") --host $HostIp --port $Port --data-dir $DataDir --open-browser

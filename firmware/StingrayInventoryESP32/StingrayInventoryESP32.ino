@@ -1945,6 +1945,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       text-transform: capitalize;
     }
 
+    .inventory-table .material-col,
+    .inventory-table .material-cell {
+      width: 76px;
+      max-width: 76px;
+    }
+
     button.asset-trigger,
     .qr-modal-actions button,
     .qr-modal-head button,
@@ -1968,10 +1974,14 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       filter: none;
     }
 
-    .asset-preview {
+    .asset-preview,
+    .qr-preview {
       display: block;
-      width: 27px;
-      height: 27px;
+      width: 58px;
+      height: 58px;
+    }
+
+    .asset-preview {
       padding: 0.08rem;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -1986,7 +1996,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     .asset-cell {
       text-align: center;
-      width: 78px;
+      width: 88px;
     }
 
     .qr-modal[hidden] {
@@ -2215,7 +2225,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       <div class="stack">
         <div>
           <label for="search-input">Search</label>
-          <input id="search-input" type="search" placeholder="Search by part name, category, part number, QR code, color, material, or image ref">
+          <input id="search-input" type="search" placeholder="Search by name, category, part number, QR/UPC, color, material, or image ref">
         </div>
 
         <div>
@@ -2278,7 +2288,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         <table>
           <thead>
             <tr>
-              <th>Part / Product / Kit</th>
+              <th>Name</th>
               <th>In Stock</th>
               <th>Needed</th>
               <th>Out Of Stock</th>
@@ -2306,7 +2316,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           <thead>
             <tr>
               <th>Part Number</th>
-              <th>Part / Product / Kit</th>
+              <th>Name</th>
               <th>Category</th>
               <th>In Stock</th>
               <th>Needed</th>
@@ -2448,14 +2458,14 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       <h2 id="inventory-title">All Inventory</h2>
       <p class="caption" id="inventory-caption">Loading inventory...</p>
       <div class="table-wrap">
-        <table>
+        <table class="inventory-table">
           <thead>
             <tr>
               <th>Part Number</th>
               <th>Category</th>
-              <th>Part Name</th>
+              <th>Name</th>
               <th>Color</th>
-              <th>Material</th>
+              <th class="material-col">Material</th>
               <th>Qty</th>
               <th>Image</th>
               <th>QR Code</th>
@@ -2957,7 +2967,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     function renderCaption(items) {
       const zeroCount = items.filter((item) => Number(item.qty) === 0).length;
       inventoryTitle.textContent = tabLabels[state.activeCategory];
-      inventoryCaption.textContent = `${items.length} item(s) shown. ${zeroCount} out of stock. Search matches part name, category, part number, QR code, color, material, and image reference.`;
+      inventoryCaption.textContent = `${items.length} item(s) shown. ${zeroCount} out of stock. Search matches name, category, part number, QR/UPC, color, material, and image reference.`;
     }
 
     function syncTabs() {
@@ -3326,11 +3336,11 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         </td>
         <td>
           <div class="cell-stack">
-            <input data-draft-field="part_name" type="text" placeholder="Part name" value="${escapeHtml(state.draftItem.part_name)}" required>
+            <input data-draft-field="part_name" type="text" placeholder="Name" value="${escapeHtml(state.draftItem.part_name)}" required>
           </div>
         </td>
         <td>${recentSelectHtml('color', 'colors', 'Select color', 'Add new color')}</td>
-        <td>${recentSelectHtml('material', 'materials', 'Select material', 'Add new material')}</td>
+        <td class="material-cell">${recentSelectHtml('material', 'materials', 'Select material', 'Add new material')}</td>
         <td>
           <div class="cell-stack">
             <input data-draft-field="qty" type="number" min="0" value="${escapeHtml(state.draftItem.qty)}">
@@ -3409,9 +3419,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         return;
       }
 
-      const safeId = escapeHtml(activeQrPreview.itemId || 'Item QR');
-      const safeLink = escapeHtml(activeQrPreview.link);
-      const safeQrSrc = escapeHtml(activeQrPreview.qrSrc);
+      const titleText = String(activeQrPreview.itemId || 'Item QR');
+      const linkText = String(activeQrPreview.link || '');
+      const qrSrc = String(activeQrPreview.qrSrc || '');
       const printWindow = window.open('', '_blank', 'width=520,height=720');
 
       if (!printWindow) {
@@ -3419,84 +3429,94 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         return;
       }
 
-      printWindow.document.write(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${safeId}</title>
-  <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      padding: 1.25rem;
-      font-family: "Segoe UI", Tahoma, sans-serif;
-      color: #1b2f3f;
-      background: #ffffff;
-    }
-    .print-card {
-      max-width: 360px;
-      margin: 0 auto;
-      text-align: center;
-      border: 1px solid #d5dde2;
-      border-radius: 18px;
-      padding: 1rem;
-    }
-    h1 {
-      margin: 0 0 0.85rem;
-      font-size: 1.2rem;
-    }
-    img {
-      display: block;
-      width: 100%;
-      max-width: 260px;
-      height: auto;
-      margin: 0 auto 0.9rem;
-      padding: 0.8rem;
-      border: 1px solid #d5dde2;
-      border-radius: 16px;
-      background: #fff;
-      image-rendering: pixelated;
-    }
-    .link {
-      margin: 0;
-      font-size: 0.85rem;
-      word-break: break-all;
-    }
-    @media print {
-      body {
-        padding: 0;
-      }
-      .print-card {
-        border: 0;
-      }
-    }
-  </style>
-</head>
-<body>
-  <main class="print-card">
-    <h1>${safeId}</h1>
-    <img id="print-qr" src="${safeQrSrc}" alt="QR code for item ${safeId}">
-    <p class="link">${safeLink}</p>
-  </main>
-</body>
-</html>`);
-      printWindow.document.close();
+      const printDoc = printWindow.document;
+      printDoc.title = titleText;
+      printDoc.head.innerHTML = '';
+      printDoc.body.innerHTML = '';
+
+      const metaCharset = printDoc.createElement('meta');
+      metaCharset.setAttribute('charset', 'utf-8');
+      const metaViewport = printDoc.createElement('meta');
+      metaViewport.setAttribute('name', 'viewport');
+      metaViewport.setAttribute('content', 'width=device-width, initial-scale=1');
+      const title = printDoc.createElement('title');
+      title.textContent = titleText;
+      const style = printDoc.createElement('style');
+      style.textContent = `
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          padding: 1.25rem;
+          font-family: "Segoe UI", Tahoma, sans-serif;
+          color: #1b2f3f;
+          background: #ffffff;
+        }
+        .print-card {
+          max-width: 360px;
+          margin: 0 auto;
+          text-align: center;
+          border: 1px solid #d5dde2;
+          border-radius: 18px;
+          padding: 1rem;
+        }
+        h1 {
+          margin: 0 0 0.85rem;
+          font-size: 1.2rem;
+        }
+        img {
+          display: block;
+          width: 100%;
+          max-width: 260px;
+          height: auto;
+          margin: 0 auto 0.9rem;
+          padding: 0.8rem;
+          border: 1px solid #d5dde2;
+          border-radius: 16px;
+          background: #fff;
+          image-rendering: pixelated;
+        }
+        .link {
+          margin: 0;
+          font-size: 0.85rem;
+          word-break: break-all;
+        }
+        @media print {
+          body {
+            padding: 0;
+          }
+          .print-card {
+            border: 0;
+          }
+        }
+      `;
+      printDoc.head.append(metaCharset, metaViewport, title, style);
+
+      const card = printDoc.createElement('main');
+      card.className = 'print-card';
+      const heading = printDoc.createElement('h1');
+      heading.textContent = titleText;
+      const image = printDoc.createElement('img');
+      image.id = 'print-qr';
+      image.src = qrSrc;
+      image.alt = `QR code for item ${titleText}`;
+      const link = printDoc.createElement('p');
+      link.className = 'link';
+      link.textContent = linkText;
+      card.append(heading, image, link);
+      printDoc.body.appendChild(card);
 
       const runPrint = () => {
         printWindow.focus();
         printWindow.print();
       };
 
-      printWindow.addEventListener('load', () => {
-        const image = printWindow.document.getElementById('print-qr');
-        if (image && !image.complete) {
-          image.addEventListener('load', runPrint, { once: true });
-          image.addEventListener('error', runPrint, { once: true });
-          return;
-        }
-        runPrint();
-      }, { once: true });
+      if (image && !image.complete) {
+        image.addEventListener('load', runPrint, { once: true });
+        image.addEventListener('error', runPrint, { once: true });
+        return;
+      }
+
+      runPrint();
     }
 
     function toWholeNumber(value, fallback = 0) {
@@ -4012,7 +4032,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           <td><span class="meta-chip">${escapeHtml(item.category_label || item.category)}</span></td>
           <td>${escapeHtml(item.part_name || '')}</td>
           <td>${escapeHtml(item.color || '')}</td>
-          <td>${escapeHtml(item.material || '')}</td>
+          <td class="material-cell">${escapeHtml(item.material || '')}</td>
           <td><span class="qty-pill">${item.qty}</span></td>
           <td class="asset-cell">
             ${imageSrc ? `
@@ -4082,7 +4102,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       if (!draft.part_name) {
-        setStatus('Part name is required.', 'error');
+        setStatus('Name is required.', 'error');
         focusDraftField('[data-draft-field="part_name"]');
         return;
       }
@@ -5325,11 +5345,11 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
           <div class="info-value compact" id="item-category">-</div>
         </div>
         <div class="info-box">
-          <span class="info-label">Part Name</span>
+          <span class="info-label">Name</span>
           <div class="info-value" id="item-name">-</div>
         </div>
         <div class="info-box">
-          <span class="info-label">QR Code</span>
+          <span class="info-label">QR/UPC</span>
           <div class="info-value compact" id="item-qr-code">-</div>
         </div>
         <div class="info-box">
@@ -5341,11 +5361,11 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
           <div class="info-value compact" id="item-material">-</div>
         </div>
         <div class="info-box">
-          <span class="info-label">BOM Product / Kit</span>
+          <span class="info-label">Parent Product / Kit</span>
           <div class="info-value compact" id="item-bom-product">-</div>
         </div>
         <div class="info-box">
-          <span class="info-label">BOM Qty</span>
+          <span class="info-label">Qty Used In Parent</span>
           <div class="info-value compact" id="item-bom-qty">-</div>
         </div>
         <div class="info-box">
@@ -5507,7 +5527,7 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
 
       if (!(item.has_bom || item.category === 'product' || item.category === 'kit')) {
         bomCaptionEl.textContent = 'This item is not a product or kit, so it does not own a BOM list.';
-        bomListEl.innerHTML = '<div class="bom-empty">Parts can still point to this item through the BOM Product / Kit field.</div>';
+        bomListEl.innerHTML = '<div class="bom-empty">Parts can still point to this item through the parent product / kit field.</div>';
         return;
       }
 
@@ -5528,7 +5548,7 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
           </div>
           <div class="bom-meta">Color: ${displayValue(component.color)}</div>
           <div class="bom-meta">Material: ${displayValue(component.material)}</div>
-          <div class="bom-meta">BOM Qty: ${component.bom_qty || 0}</div>
+          <div class="bom-meta">Qty Used In Parent: ${component.bom_qty || 0}</div>
           <div class="bom-meta">Stock: ${component.qty}</div>
         `;
         bomListEl.appendChild(node);
@@ -5619,7 +5639,7 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
 
     async function loadItem() {
       if (!itemId) {
-        throw new Error('Missing item id in URL.');
+        throw new Error('Missing part number in URL.');
       }
       const data = await readJson(`/api/item?id=${encodeURIComponent(itemId)}`);
       updateMeta(data.item);
@@ -6262,7 +6282,7 @@ bool parseOrderFulfillmentPlan(const String& rawPlan, std::vector<OrderFulfillme
 
     const String itemId = trimCopy(fields[0]);
     if (itemId.isEmpty()) {
-      errorMessage = "Fulfillment item id is required.";
+      errorMessage = "Fulfillment part number is required.";
       return false;
     }
 
@@ -9518,7 +9538,7 @@ void handleGetItem() {
 
   String id;
   if (!parseIdArg("id", id)) {
-    sendError(400, "Missing or invalid item id.");
+    sendError(400, "Missing or invalid part number.");
     return;
   }
 
@@ -9540,7 +9560,7 @@ void handleAddItem() {
   String partName = server.hasArg("part_name") ? server.arg("part_name") : "";
   partName = sanitizeField(partName);
   if (partName.isEmpty()) {
-    sendError(400, "Part name is required.");
+    sendError(400, "Name is required.");
     return;
   }
 
@@ -9573,12 +9593,12 @@ void handleAddItem() {
   }
 
   if (bomProduct.isEmpty() && bomQty > 0) {
-    sendError(400, "BOM product is required when BOM quantity is set.");
+    sendError(400, "Parent product or kit is required when quantity used in parent is set.");
     return;
   }
 
   if (category != "part" && (!bomProduct.isEmpty() || bomQty > 0)) {
-    sendError(400, "Only parts can be assigned to a BOM product or kit.");
+    sendError(400, "Only parts can be assigned to a parent product or kit.");
     return;
   }
 
@@ -9594,7 +9614,7 @@ void handleAddItem() {
   }
 
   if (findItemIndex(id) >= 0) {
-    sendError(409, "Item id already exists.");
+    sendError(409, "Part number already exists.");
     return;
   }
 
@@ -9646,7 +9666,7 @@ void handleRemoveItem() {
 
   String id;
   if (!parseIdArg("id", id)) {
-    sendError(400, "Missing or invalid item id.");
+    sendError(400, "Missing or invalid part number.");
     return;
   }
 
@@ -9682,7 +9702,7 @@ void handleAdjustItem() {
   int32_t delta = 0;
 
   if (!parseIdArg("id", id)) {
-    sendError(400, "Missing or invalid item id.");
+    sendError(400, "Missing or invalid part number.");
     return;
   }
 
@@ -9737,7 +9757,7 @@ void handleSetItemQty() {
   int32_t qty = 0;
 
   if (!parseIdArg("id", id)) {
-    sendError(400, "Missing or invalid item id.");
+    sendError(400, "Missing or invalid part number.");
     return;
   }
 

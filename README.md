@@ -16,15 +16,15 @@ Stingray Inventory System is now an ESP32-hosted inventory app.
   - parts
   - products
   - kits
-- Search by part name, category, part number, QR code, color, material, or BOM fields
+- Search by name, category, part number, QR/UPC, color, material, or parent product/kit fields
 - Export filtered inventory CSV by category
 - Open per-item page links (`/item?id=<part_number>`) for QR labels
 - On per-item page: add/subtract with `+1`, `-1`, or custom number
 - Set exact quantity directly
 - Highlight zero-stock rows in red on the main page
 - Store a simple BOM:
-  - parts can point to a `bom_product`
-  - `bom_qty` is the quantity of that part used in the product or kit
+  - parts can point to a parent product or kit with `bom_product`
+  - `bom_qty` is the quantity of that part used in the parent product or kit
   - products and kits automatically show their BOM components on the item page
 
 ## Repository Layout
@@ -39,6 +39,8 @@ Stingray Inventory System is now an ESP32-hosted inventory app.
 
 You can now run Stingray Inventory directly on Windows while preserving existing SD data formats.
 
+The Windows desktop app is LAN-first: it listens on `0.0.0.0:8787`, remains available on the PC at `http://127.0.0.1:8787`, and lets Settings choose the LAN base URL used by QR codes and exports.
+
 - Desktop entry point: `desktop_app/stingray_desktop_app.py`
 - One-command setup/run on Windows: `desktop_app/install_and_run.ps1`
 - Build standalone desktop installer bundle: `desktop_app/build_installer.ps1`
@@ -46,7 +48,7 @@ You can now run Stingray Inventory directly on Windows while preserving existing
 - Stop desktop app + disable autostart: `desktop_app/stop_desktop_app.ps1`
 - Uninstall desktop app: `desktop_app/uninstall_desktop_app.ps1`
 - Desktop notes: `desktop_app/README.md`
-- Desktop installer now supports default branding + desktop shortcut + system startup task (before login).
+- Desktop installer now supports Stingray branding, desktop shortcut, system startup task with crash restart, LAN firewall access for TCP `8787`, and a Settings toggle for autorun.
 - Installer ZIP includes one-click setup (`Install Stingray Inventory Desktop.cmd`) that prompts for UAC and configures startup correctly.
 
 ## Hardware
@@ -196,7 +198,7 @@ The ESP32 inventory schema and spreadsheet export now use the same flat field se
 - `updated_at`
 - `qr_link`
 
-`part_number` is the primary identifier. The app still uses `/item?id=<part_number>` in URLs, but there is no separate `id` column in inventory export. `qr_code` is the stored QR or UPC value. `qr_link` is derived by the ESP32 for label use and export. A part belongs to a product or kit when its `bom_product` matches that product or kit part number.
+`part_number` is the primary identifier. The app still uses `/item?id=<part_number>` in URLs, but there is no separate `id` column in inventory export. `part_name` stores the display name for parts, products, and kits. `qr_code` is the stored QR or UPC value. `qr_link` is derived by the ESP32 for label use and export. A part belongs to a parent product or kit when its `bom_product` matches that product or kit part number.
 
 ## Notes
 

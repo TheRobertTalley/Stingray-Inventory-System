@@ -210,7 +210,7 @@ jobs:
           desktop_entry = {
             "id": desktop_id,
             "name": "STINGRAY INVENTORY DESKTOP (Windows Installer)",
-            "summary": "Native Windows installer for Stingray Inventory with SD-compatible data files, desktop/startup integration, and branded shortcuts.",
+            "summary": "One-click Windows installer for Stingray Inventory with SD-compatible data, Stingray-branded desktop shortcut, LAN access, and startup crash restart.",
             "version": version,
             "updated": updated,
             "download_url": f"projects/{project_id}/{versioned_names['desktop_installer.zip']}",
@@ -219,7 +219,9 @@ jobs:
             "notes": [
               "Extract the zip and run: Install Stingray Inventory Desktop.cmd",
               "Windows will prompt for Administrator approval (UAC).",
-              "Installs as a system startup task so it runs before login.",
+              "Installs as a SYSTEM startup task and restarts after crashes by default.",
+              "Settings can turn Auto run and crash restart off on test PCs.",
+              "Creates a Windows Firewall rule for TCP 8787 on Private/Public network profiles.",
             ],
           }
 

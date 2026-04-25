@@ -10,7 +10,9 @@ desktop_app/test_data/
 desktop_app/live_test_data/
 desktop_app/build/
 desktop_app/dist/
-desktop_app/branding/
+desktop_app/branding/*
+!desktop_app/branding/
+!desktop_app/branding/stingray-logo.png
 desktop_app/stingray_desktop.ico
 StingrayInventoryDesktop.spec
 build/

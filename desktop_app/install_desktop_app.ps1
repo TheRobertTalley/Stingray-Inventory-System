@@ -8,6 +8,7 @@ param(
   [switch]$NoDesktopShortcut,
   [switch]$NoAutoStart,
   [string]$SystemTaskName = "Stingray Inventory Desktop (System Startup)",
+  [string]$FirewallRuleName = "Stingray Inventory Desktop LAN",
   [switch]$RunAfterInstall
 )
 
@@ -147,7 +148,8 @@ if (-not (Test-IsAdministrator)) {
     "-Port", $Port.ToString(),
     "-BrandName", $BrandName,
     "-BrandLogoPath", $BrandLogoPath,
-    "-SystemTaskName", $SystemTaskName
+    "-SystemTaskName", $SystemTaskName,
+    "-FirewallRuleName", $FirewallRuleName
   )
   if ($NoDesktopShortcut) { $elevatedArgs += "-NoDesktopShortcut" }
   if ($NoAutoStart) { $elevatedArgs += "-NoAutoStart" }
@@ -183,6 +185,19 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "images") | Out-Nu
 Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Path (Join-Path $SourceDir "*") -Destination $InstallDir -Recurse -Force
 
+$existingFirewallRule = Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
+if ($existingFirewallRule) {
+  Remove-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
+}
+New-NetFirewallRule `
+  -DisplayName $FirewallRuleName `
+  -Direction Inbound `
+  -Action Allow `
+  -Protocol TCP `
+  -LocalPort $Port `
+  -Profile Private,Public `
+  -Description "Allow Stingray Inventory Desktop from devices on the local LAN, including Windows networks classified as Public." | Out-Null
+
 $mainPageUrl = "http://127.0.0.1:$Port/"
 $launcherPath = Join-Path $InstallDir "Run-StingrayDesktop.cmd"
 $launcherContent = @"
@@ -192,7 +207,7 @@ set APPDIR=%~dp0
 set URL=$mainPageUrl
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri '%URL%api/status' -UseBasicParsing -TimeoutSec 2 | Out-Null; Start-Process '%URL%'; exit 0 } catch { exit 1 }"
 if %ERRORLEVEL% EQU 0 goto :done
-"%APPDIR%StingrayInventoryDesktop.exe" --host 127.0.0.1 --port $Port --data-dir "$DataDir" --open-browser
+"%APPDIR%StingrayInventoryDesktop.exe" --host 0.0.0.0 --port $Port --data-dir "$DataDir" --open-browser
 :done
 endlocal
 "@
@@ -210,7 +225,7 @@ if (-not $createdNew) {
 
 $appDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $exePath = Join-Path $appDir "StingrayInventoryDesktop.exe"
-$args = @("--host", "127.0.0.1", "--port", "__PORT__", "--data-dir", "__DATADIR__")
+$args = @("--host", "0.0.0.0", "--port", "__PORT__", "--data-dir", "__DATADIR__")
 
 while ($true) {
   $running = Get-Process -Name "StingrayInventoryDesktop" -ErrorAction SilentlyContinue
@@ -289,7 +304,7 @@ $uninstallScriptPath = Join-Path $InstallDir "uninstall_desktop_app.ps1"
 $uninstallShortcutPath = Join-Path $startMenuDir "Uninstall Stingray Inventory Desktop.lnk"
 $uninstallShortcut = $wsh.CreateShortcut($uninstallShortcutPath)
 $uninstallShortcut.TargetPath = $powershellExe
-$uninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$uninstallScriptPath`" -InstallDir `"$InstallDir`" -DataDir `"$DataDir`" -SystemTaskName `"$SystemTaskName`""
+$uninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$uninstallScriptPath`" -InstallDir `"$InstallDir`" -DataDir `"$DataDir`" -SystemTaskName `"$SystemTaskName`" -FirewallRuleName `"$FirewallRuleName`""
 $uninstallShortcut.WorkingDirectory = $InstallDir
 $uninstallShortcut.IconLocation = $shortcutIcon
 $uninstallShortcut.Description = "Uninstall Stingray Inventory Desktop (keeps data by default)"
@@ -375,3 +390,4 @@ if (-not $NoAutoStart) {
 } else {
   Write-Host "System startup task: disabled"
 }
+Write-Host "Firewall rule: $FirewallRuleName (TCP $Port, Private/Public profiles)"

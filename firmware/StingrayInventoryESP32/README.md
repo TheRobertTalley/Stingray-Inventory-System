@@ -30,7 +30,7 @@ Created automatically if missing:
 
 Use per-item URL in your printed QR code:
 
-- `http://<esp32-host>/item?id=<item_id>`
+- `http://<esp32-host>/item?id=<part_number>`
 
 Example:
 

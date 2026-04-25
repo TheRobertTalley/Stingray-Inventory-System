@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import os
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -14,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
+import zipfile
 
 import qrcode
 import qrcode.image.svg
@@ -28,6 +33,19 @@ CLOUD_CONFIG_HEADER = "provider|login_email|folder_name|folder_hint|mode|backup_
 GOOGLE_STATE_HEADER = "refresh_token|folder_id|last_sync_at|last_synced_manifest_hash|last_synced_snapshot_at|local_snapshot_at|auth_status|sync_status|last_error"
 DEFAULT_CATEGORY = "part"
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+APP_CONFIG_FILE = "desktop_config.json"
+FIREWALL_RULE_NAME = "Stingray Inventory Desktop LAN"
+SYSTEM_TASK_NAME = "Stingray Inventory Desktop (System Startup)"
+IMPORT_COPY_FILES = [
+    "inventory.csv",
+    "orders.json",
+    "transactions.csv",
+    "device_log.csv",
+    "time_log.csv",
+    "cloud_backup.cfg",
+    "google_drive_state.cfg",
+]
+SD_IMPORT_SEARCH_DEPTH = 4
 
 
 def runtime_root() -> Path:
@@ -56,6 +74,15 @@ class ItemRecord:
     bom_product: str
     bom_qty: int
     updated_at: str
+
+
+@dataclass
+class DesktopConfig:
+    bind_host: str = "0.0.0.0"
+    port: int = 8787
+    selected_lan_ip: str = ""
+    configured_network_base_url: str = ""
+    updated_at: str = ""
 
 
 @dataclass
@@ -187,6 +214,134 @@ def sanitize_filename_stem(value: str) -> str:
     return stem or "image"
 
 
+def is_loopback_host(host: str) -> bool:
+    text = trim_copy(host).lower()
+    if text in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
+
+
+def normalize_base_url(value: str) -> str:
+    text = trim_copy(value).rstrip("/")
+    if not text:
+        return ""
+    if not re.match(r"^https?://", text, re.I):
+        text = "http://" + text
+    parsed = urlparse(text)
+    if not parsed.hostname:
+        return ""
+    return f"{parsed.scheme or 'http'}://{parsed.netloc}".rstrip("/")
+
+
+def detect_lan_ips() -> list[str]:
+    found: set[str] = set()
+
+    def add_ip(value: str) -> None:
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            return
+        if ip.version == 4 and not ip.is_loopback and not ip.is_link_local and not ip.is_multicast:
+            found.add(str(ip))
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            add_ip(info[4][0])
+    except OSError:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            add_ip(sock.getsockname()[0])
+    except OSError:
+        pass
+
+    def sort_key(value: str) -> tuple[int, tuple[int, int, int, int]]:
+        parts = tuple(int(part) for part in value.split("."))
+        if value.startswith("192.168."):
+            rank = 0
+        elif value.startswith("10."):
+            rank = 1
+        elif parts[0] == 172 and 16 <= parts[1] <= 31:
+            rank = 2
+        else:
+            rank = 3
+        return rank, parts
+
+    return sorted(found, key=sort_key)
+
+
+def default_lan_ip() -> str:
+    ips = detect_lan_ips()
+    return ips[0] if ips else "127.0.0.1"
+
+
+def firewall_rule_status(port: int) -> dict[str, Any]:
+    if os.name != "nt":
+        return {"supported": False, "installed": False, "detail": "Windows Firewall check is Windows-only."}
+    try:
+        result = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={FIREWALL_RULE_NAME}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        text = (result.stdout or "") + (result.stderr or "")
+        installed = result.returncode == 0 and FIREWALL_RULE_NAME in text
+        return {"supported": True, "installed": installed, "detail": "Installed" if installed else f"Missing TCP {port} rule"}
+    except Exception as exc:
+        return {"supported": True, "installed": False, "detail": f"Unable to check firewall: {exc}"}
+
+
+def scheduled_task_status(task_name: str = SYSTEM_TASK_NAME) -> dict[str, Any]:
+    if os.name != "nt":
+        return {"supported": False, "exists": False, "enabled": False, "running": False, "detail": "Windows-only."}
+    try:
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", task_name, "/FO", "LIST", "/V"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        text = result.stdout or ""
+        exists = result.returncode == 0 and task_name in text
+        running = exists and re.search(r"Status:\s+Running", text, re.I) is not None
+        disabled = re.search(r"Scheduled Task State:\s+Disabled", text, re.I) is not None
+        enabled = exists and (running or not disabled)
+        return {"supported": True, "exists": exists, "enabled": enabled, "running": running, "detail": "Installed" if exists else "Not installed"}
+    except Exception as exc:
+        return {"supported": True, "exists": False, "enabled": False, "running": False, "detail": f"Unable to check task: {exc}"}
+
+
+def run_command(args: list[str]) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=10, check=False)
+        return result.returncode == 0, trim_copy((result.stdout or "") + "\n" + (result.stderr or ""))
+    except Exception as exc:
+        return False, str(exc)
+
+
+def truthy(value: str) -> bool:
+    return trim_copy(value).lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def set_windows_autorun(enabled: bool) -> tuple[bool, str]:
+    if os.name != "nt":
+        return False, "Windows only"
+    action = "/ENABLE" if enabled else "/DISABLE"
+    ok, detail = run_command(["schtasks", "/Change", "/TN", SYSTEM_TASK_NAME, action])
+    if not ok and not enabled:
+        lowered = detail.lower()
+        if "cannot find" in lowered or "does not exist" in lowered:
+            return True, "Startup task is not installed."
+    return ok, detail
+
+
 def parse_inventory_line(line: str) -> ItemRecord | None:
     fields = split_pipe_line(line)
     if len(fields) < 4:
@@ -252,9 +407,59 @@ def parse_inventory_line(line: str) -> ItemRecord | None:
     return item
 
 
+def normalize_local_folder_path(path: str) -> Path:
+    text = trim_copy(path).strip('"').strip("'")
+    if os.name == "nt" and re.fullmatch(r"[A-Za-z]:", text):
+        text += "\\"
+    return Path(text)
+
+
+def is_inventory_header_line(line: str) -> bool:
+    text = line.strip().lstrip("\ufeff").lower()
+    if not text:
+        return False
+    fields = split_pipe_line(text)
+    if not fields:
+        return False
+    header_tokens = {
+        "part_number",
+        "id",
+        "category",
+        "part_name",
+        "name",
+        "qr_code",
+        "qr",
+        "color",
+        "material",
+        "qty",
+        "quantity",
+        "image_ref",
+        "bom_product",
+        "bom_qty",
+        "updated_at",
+    }
+    matches = sum(1 for field in fields if field in header_tokens)
+    return fields[0] in {"part_number", "id"} or (matches >= 2 and any(field in {"qty", "quantity"} for field in fields))
+
+
+def resolved_child(folder: Path, name: str) -> Path:
+    direct = folder / name
+    if direct.exists():
+        return direct
+    try:
+        lookup = name.lower()
+        for child in folder.iterdir():
+            if child.name.lower() == lookup:
+                return child
+    except OSError:
+        pass
+    return direct
+
+
 class DesktopStore:
-    def __init__(self, data_dir: Path, firmware_ino: Path | None) -> None:
+    def __init__(self, data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.0.0", port: int = 8787) -> None:
         self.data_dir = data_dir
+        self.backups_dir = self.data_dir.parent / "backups"
         self.images_dir = self.data_dir / "images"
         self.inventory_file = self.data_dir / "inventory.csv"
         self.inventory_tmp_file = self.data_dir / "inventory.tmp"
@@ -267,6 +472,8 @@ class DesktopStore:
         self.cloud_config_tmp_file = self.data_dir / "cloud_backup.tmp"
         self.google_state_file = self.data_dir / "google_drive_state.cfg"
         self.google_state_tmp_file = self.data_dir / "google_drive_state.tmp"
+        self.app_config_file = self.data_dir / APP_CONFIG_FILE
+        self.app_config_tmp_file = self.data_dir / "desktop_config.tmp"
         self.lock = threading.RLock()
         self.start_monotonic = time.monotonic()
         self.mac_address = self._mac_address_string()
@@ -275,8 +482,10 @@ class DesktopStore:
         self.cloud_config = CloudConfig()
         self.google_state = GoogleState()
         self.wifi_config = WifiConfig()
+        self.app_config = DesktopConfig(bind_host=bind_host, port=port)
         self.index_html, self.item_html = self._load_ui_assets(firmware_ino)
         self._ensure_data_files()
+        self._load_app_config(bind_host, port)
         self._load_cloud_config()
         self._load_google_state()
         self._load_inventory()
@@ -317,6 +526,7 @@ class DesktopStore:
 
     def _ensure_data_files(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.backups_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(parents=True, exist_ok=True)
         if not self.inventory_file.exists():
             self.inventory_file.write_text(INVENTORY_HEADER + "\n", encoding="utf-8")
@@ -330,13 +540,45 @@ class DesktopStore:
         if not self.google_state_file.exists():
             self._save_google_state()
 
+    def _load_app_config(self, bind_host: str, port: int) -> None:
+        cfg = DesktopConfig(bind_host=bind_host or "0.0.0.0", port=port or 8787)
+        if self.app_config_file.exists():
+            try:
+                data = json.loads(self.app_config_file.read_text(encoding="utf-8"))
+                cfg.bind_host = trim_copy(str(data.get("bind_host", cfg.bind_host))) or cfg.bind_host
+                cfg.port = int(data.get("port", cfg.port) or cfg.port)
+                cfg.selected_lan_ip = trim_copy(str(data.get("selected_lan_ip", "")))
+                cfg.configured_network_base_url = normalize_base_url(str(data.get("configured_network_base_url", "")))
+                cfg.updated_at = trim_copy(str(data.get("updated_at", "")))
+            except (ValueError, json.JSONDecodeError):
+                pass
+        cfg.bind_host = bind_host or cfg.bind_host or "0.0.0.0"
+        cfg.port = port or cfg.port or 8787
+        if not cfg.selected_lan_ip:
+            cfg.selected_lan_ip = default_lan_ip()
+        if not cfg.configured_network_base_url:
+            cfg.configured_network_base_url = f"http://{cfg.selected_lan_ip}:{cfg.port}"
+        self.app_config = cfg
+        self._save_app_config()
+
+    def _save_app_config(self) -> None:
+        self.app_config.updated_at = current_timestamp()
+        self.app_config_tmp_file.write_text(json.dumps(asdict(self.app_config), indent=2) + "\n", encoding="utf-8")
+        self.app_config_tmp_file.replace(self.app_config_file)
+
+    def configured_base_url(self) -> str:
+        base = normalize_base_url(self.app_config.configured_network_base_url)
+        if base:
+            return base
+        return f"http://{self.app_config.selected_lan_ip or default_lan_ip()}:{self.app_config.port}"
+
     def _load_inventory(self) -> None:
         with self.lock:
             self.items = []
             if not self.inventory_file.exists():
                 return
             for raw in self.inventory_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = raw.strip()
+                line = raw.strip().lstrip("\ufeff")
                 if not line or line.startswith("part_number|") or line.startswith("id|"):
                     continue
                 parsed = parse_inventory_line(line)
@@ -375,6 +617,19 @@ class DesktopStore:
         payload = self.orders_file.read_text(encoding="utf-8", errors="replace").strip()
         return payload if payload else '{"orders":[]}'
 
+    def _read_orders_from_file(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists() or not path.is_file():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace") or "{}")
+        except json.JSONDecodeError:
+            return []
+        orders = payload.get("orders") if isinstance(payload, dict) else []
+        return [order for order in orders if isinstance(order, dict)] if isinstance(orders, list) else []
+
+    def _order_key(self, order: dict[str, Any]) -> str:
+        return trim_copy(str(order.get("order_number", ""))).upper()
+
     def _save_orders_payload(self, payload: str) -> bool:
         trimmed = trim_copy(payload)
         if not trimmed:
@@ -383,13 +638,72 @@ class DesktopStore:
         self.orders_tmp_file.replace(self.orders_file)
         return True
 
+    def _merge_orders_from_file(self, src: Path) -> tuple[int, int, int]:
+        incoming = self._read_orders_from_file(src)
+        current = self._read_orders_from_file(self.orders_file)
+        by_number: dict[str, dict[str, Any]] = {}
+        order_keys: list[str] = []
+        for order in current:
+            key = self._order_key(order)
+            if not key:
+                continue
+            by_number[key] = order
+            order_keys.append(key)
+
+        added = 0
+        updated = 0
+        skipped = 0
+        for order in incoming:
+            key = self._order_key(order)
+            if not key:
+                skipped += 1
+                continue
+            if key in by_number:
+                updated += 1
+            else:
+                added += 1
+                order_keys.append(key)
+            by_number[key] = order
+
+        merged = [by_number[key] for key in order_keys if key in by_number]
+        merged.sort(key=lambda order: str(order.get("updated_at") or order.get("created_at") or ""), reverse=True)
+        self._save_orders_payload(json.dumps({"orders": merged}, indent=2))
+        return added, updated, skipped
+
+    def _count_orders(self, orders_file: Path) -> int:
+        return len(self._read_orders_from_file(orders_file))
+
+    def _append_data_rows_from_file(self, src: Path, dst: Path) -> int:
+        if not src.exists() or not src.is_file():
+            return 0
+        existing: set[str] = set()
+        if dst.exists() and dst.is_file():
+            for raw in dst.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip().lstrip("\ufeff")
+                if line and not line.lower().startswith("timestamp|"):
+                    existing.add(line)
+
+        rows: list[str] = []
+        for raw in src.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip().lstrip("\ufeff")
+            if not line or line.lower().startswith("timestamp|") or line in existing:
+                continue
+            rows.append(line)
+            existing.add(line)
+
+        if rows:
+            with dst.open("a", encoding="utf-8") as f:
+                for line in rows:
+                    f.write(line + "\n")
+        return len(rows)
+
     def _load_cloud_config(self) -> None:
         if not self.cloud_config_file.exists():
             self.cloud_config = CloudConfig()
             return
         lines = self.cloud_config_file.read_text(encoding="utf-8", errors="replace").splitlines()
         for raw in lines:
-            line = raw.strip()
+            line = raw.strip().lstrip("\ufeff")
             if not line or line.startswith("provider|"):
                 continue
             fields = split_pipe_line(line)
@@ -440,7 +754,7 @@ class DesktopStore:
             return
         lines = self.google_state_file.read_text(encoding="utf-8", errors="replace").splitlines()
         for raw in lines:
-            line = raw.strip()
+            line = raw.strip().lstrip("\ufeff")
             if not line or line.startswith("refresh_token|"):
                 continue
             fields = split_pipe_line(line)
@@ -606,6 +920,282 @@ class DesktopStore:
             lines.append(line)
         return lines[-limit:]
 
+    def backup_zip_path(self) -> Path:
+        stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        return self.backups_dir / f"stingray-backup-{stamp}.zip"
+
+    def create_backup_zip(self, reason: str) -> Path:
+        self.backups_dir.mkdir(parents=True, exist_ok=True)
+        target = self.backup_zip_path()
+        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                "manifest.json",
+                json.dumps({"created_at": current_timestamp(), "reason": reason, "item_count": len(self.items)}, indent=2) + "\n",
+            )
+            for name in IMPORT_COPY_FILES + [APP_CONFIG_FILE]:
+                path = self.data_dir / name
+                if path.exists() and path.is_file():
+                    zf.write(path, name)
+            if self.images_dir.exists():
+                for path in self.images_dir.rglob("*"):
+                    if path.is_file():
+                        zf.write(path, path.relative_to(self.data_dir).as_posix())
+        self.append_device_log("backup_created", f"{target.name} ({reason})")
+        return target
+
+    def restore_backup_zip(self, zip_path: Path) -> dict[str, Any]:
+        backup = self.create_backup_zip("before_backup_restore")
+        restored: list[str] = []
+        allowed_names = set(IMPORT_COPY_FILES + [APP_CONFIG_FILE])
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for raw_name in zf.namelist():
+                name = raw_name.replace("\\", "/").lstrip("/")
+                if not name or name == "manifest.json" or ".." in name:
+                    continue
+                if not (name in allowed_names or name.startswith("images/")):
+                    continue
+                target = self.data_dir / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(raw_name) as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                restored.append(name)
+        self._load_inventory()
+        self._load_cloud_config()
+        self._load_google_state()
+        self._load_app_config(self.app_config.bind_host, self.app_config.port)
+        self.append_device_log("backup_restored", f"Restored {len(restored)} files from {zip_path.name}")
+        return {"ok": True, "backup_before_restore": backup.name, "files_restored": restored}
+
+    def _sd_child(self, folder: Path, name: str) -> Path:
+        return resolved_child(folder, name)
+
+    def _sd_images_dir(self, folder: Path) -> Path:
+        return resolved_child(folder, "images")
+
+    def _sd_files_found(self, folder: Path) -> list[str]:
+        found: list[str] = []
+        for name in IMPORT_COPY_FILES:
+            child = self._sd_child(folder, name)
+            if child.exists() and child.is_file():
+                found.append(name)
+        return found
+
+    def _count_inventory_rows(self, inventory_file: Path) -> int:
+        if not inventory_file.exists() or not inventory_file.is_file():
+            return 0
+        count = 0
+        for raw in inventory_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip().lstrip("\ufeff")
+            if line and not is_inventory_header_line(line) and parse_inventory_line(line):
+                count += 1
+        return count
+
+    def _count_transaction_rows(self, transaction_file: Path) -> int:
+        if not transaction_file.exists() or not transaction_file.is_file():
+            return 0
+        rows = []
+        for raw in transaction_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip().lstrip("\ufeff")
+            if line and not line.lower().startswith("timestamp|"):
+                rows.append(line)
+        return len(rows)
+
+    def _count_images(self, images_dir: Path) -> int:
+        if not images_dir.exists() or not images_dir.is_dir():
+            return 0
+        return len([path for path in images_dir.rglob("*") if path.is_file()])
+
+    def _sd_candidate_score(self, folder: Path) -> tuple[int, int, int, int]:
+        inventory_count = self._count_inventory_rows(self._sd_child(folder, "inventory.csv"))
+        files_found = self._sd_files_found(folder)
+        images_found = self._count_images(self._sd_images_dir(folder))
+        marker_count = len(files_found) + (1 if images_found else 0)
+        return inventory_count, marker_count, images_found, -len(folder.parts)
+
+    def resolve_sd_import_root(self, folder: Path) -> tuple[Path, list[str]]:
+        messages: list[str] = []
+        if not folder.exists() or not folder.is_dir():
+            raise ValueError("SD folder not found.")
+
+        direct_score = self._sd_candidate_score(folder)
+        if direct_score[0] > 0 or direct_score[1] > 0:
+            return folder, messages
+
+        candidates: list[tuple[tuple[int, int, int, int], Path]] = []
+        pending: list[tuple[Path, int]] = [(folder, 0)]
+        try:
+            while pending:
+                current, depth = pending.pop()
+                if depth >= SD_IMPORT_SEARCH_DEPTH:
+                    continue
+                for candidate in current.iterdir():
+                    try:
+                        if candidate.is_symlink() or not candidate.is_dir():
+                            continue
+                    except OSError:
+                        continue
+                    score = self._sd_candidate_score(candidate)
+                    if score[0] > 0 or score[1] > 0:
+                        candidates.append((score, candidate))
+                    pending.append((candidate, depth + 1))
+        except OSError as exc:
+            messages.append(f"Stopped scanning some folders: {exc}")
+
+        if not candidates:
+            return folder, messages
+
+        candidates.sort(key=lambda entry: entry[0], reverse=True)
+        root = candidates[0][1]
+        messages.append(f"Using detected SD data folder: {root}")
+        return root, messages
+
+    def preview_sd_import(self, folder: Path) -> dict[str, Any]:
+        requested_folder = folder
+        folder, messages = self.resolve_sd_import_root(folder)
+        inventory_count = 0
+        transaction_count = 0
+        order_count = 0
+        device_log_count = 0
+        time_log_count = 0
+        image_count = 0
+        files_found: list[str] = []
+        inv = self._sd_child(folder, "inventory.csv")
+        inventory_count = self._count_inventory_rows(inv)
+        transaction_count = self._count_transaction_rows(self._sd_child(folder, "transactions.csv"))
+        order_count = self._count_orders(self._sd_child(folder, "orders.json"))
+        device_log_count = self._count_transaction_rows(self._sd_child(folder, "device_log.csv"))
+        time_log_count = self._count_transaction_rows(self._sd_child(folder, "time_log.csv"))
+        image_count = self._count_images(self._sd_images_dir(folder))
+        files_found = self._sd_files_found(folder)
+        return {
+            "requested_path": str(requested_folder),
+            "import_root": str(folder),
+            "inventory_items_found": inventory_count,
+            "orders_found": order_count,
+            "transaction_rows_found": transaction_count,
+            "device_log_rows_found": device_log_count,
+            "time_log_rows_found": time_log_count,
+            "images_found": image_count,
+            "files_found": files_found,
+            "current_inventory_items": len(self.items),
+            "recommended_action": "Merge into current inventory" if self.items else "Replace current inventory",
+            "messages": messages,
+        }
+
+    def import_sd_folder(self, folder: Path, mode: str) -> dict[str, Any]:
+        requested_folder = folder
+        folder, messages = self.resolve_sd_import_root(folder)
+        if not self._sd_files_found(folder) and not self._count_images(self._sd_images_dir(folder)):
+            raise ValueError("No Stingray SD data files were found. Select the SD card root or the folder containing inventory.csv.")
+        inv = self._sd_child(folder, "inventory.csv")
+        if mode in {"replace", "backup_replace"} and (not inv.exists() or not inv.is_file()):
+            raise ValueError("Replace import requires inventory.csv. Select the SD card root or use merge mode for image-only imports.")
+        backup = self.create_backup_zip("before_sd_import")
+        incoming: list[ItemRecord] = []
+        errors: list[str] = []
+        saw_inventory_data = False
+        if inv.exists() and inv.is_file():
+            for raw in inv.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip().lstrip("\ufeff")
+                if not line or is_inventory_header_line(line):
+                    continue
+                saw_inventory_data = True
+                parsed = parse_inventory_line(line)
+                if parsed:
+                    incoming.append(parsed)
+                else:
+                    errors.append(f"Skipped invalid inventory row: {line[:80]}")
+        if mode in {"replace", "backup_replace"} and saw_inventory_data and not incoming:
+            raise ValueError("No valid inventory rows were found in inventory.csv. Import was stopped so the current inventory is not erased.")
+
+        imported = 0
+        skipped = 0
+        replaced = 0
+        with self.lock:
+            if mode in {"replace", "backup_replace"}:
+                replaced = len(self.items)
+                self.items = incoming
+                imported = len(incoming)
+            else:
+                for item in incoming:
+                    idx = self.find_item_index(item.id)
+                    if idx >= 0:
+                        skipped += 1
+                    else:
+                        self.items.append(item)
+                        imported += 1
+            self.items.sort(key=lambda row: normalize_lookup_value(row.id))
+            self._save_inventory()
+            for item in incoming:
+                self.append_transaction(item.id, "import_item", 0, item.qty, f"SD import {mode}")
+
+        copied_files = 0
+        orders_added = 0
+        orders_updated = 0
+        orders_skipped = 0
+        transactions_imported = 0
+        device_log_rows_imported = 0
+        time_log_rows_imported = 0
+        if mode != "merge":
+            orders_added = self._count_orders(self._sd_child(folder, "orders.json"))
+            transactions_imported = self._count_transaction_rows(self._sd_child(folder, "transactions.csv"))
+            device_log_rows_imported = self._count_transaction_rows(self._sd_child(folder, "device_log.csv"))
+            time_log_rows_imported = self._count_transaction_rows(self._sd_child(folder, "time_log.csv"))
+        for name in IMPORT_COPY_FILES:
+            if name == "inventory.csv" and mode == "merge":
+                continue
+            src = self._sd_child(folder, name)
+            if src.exists() and src.is_file():
+                if mode == "merge" and name == "orders.json":
+                    orders_added, orders_updated, orders_skipped = self._merge_orders_from_file(src)
+                    copied_files += 1
+                    continue
+                if mode == "merge" and name == "transactions.csv":
+                    transactions_imported = self._append_data_rows_from_file(src, self.transaction_file)
+                    copied_files += 1
+                    continue
+                if mode == "merge" and name == "device_log.csv":
+                    device_log_rows_imported = self._append_data_rows_from_file(src, self.device_log_file)
+                    copied_files += 1
+                    continue
+                if mode == "merge" and name == "time_log.csv":
+                    time_log_rows_imported = self._append_data_rows_from_file(src, self.time_log_file)
+                    copied_files += 1
+                    continue
+                shutil.copy2(src, self.data_dir / name)
+                copied_files += 1
+        copied_images = 0
+        src_images = self._sd_images_dir(folder)
+        if src_images.exists() and src_images.is_dir():
+            for src in src_images.rglob("*"):
+                if src.is_file():
+                    dst = self.images_dir / src.relative_to(src_images)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                    copied_images += 1
+        self._load_inventory()
+        self._load_cloud_config()
+        self._load_google_state()
+        return {
+            "ok": True,
+            "backup": backup.name,
+            "requested_path": str(requested_folder),
+            "import_root": str(folder),
+            "items_imported": imported,
+            "items_skipped": skipped,
+            "items_replaced": replaced,
+            "orders_added": orders_added,
+            "orders_updated": orders_updated,
+            "orders_skipped": orders_skipped,
+            "images_copied": copied_images,
+            "files_copied": copied_files,
+            "transactions_imported": transactions_imported,
+            "device_log_rows_imported": device_log_rows_imported,
+            "time_log_rows_imported": time_log_rows_imported,
+            "errors": errors,
+            "messages": messages,
+        }
+
     def sd_status_fields(self) -> dict[str, Any]:
         return {
             "sd_ready": True,
@@ -617,12 +1207,34 @@ class DesktopStore:
         }
 
     def status_json(self, base_url: str) -> dict[str, Any]:
+        lan_ips = detect_lan_ips()
+        configured_base_url = self.configured_base_url()
+        host = urlparse(configured_base_url).hostname or ""
+        firewall = firewall_rule_status(self.app_config.port)
+        task = scheduled_task_status()
         payload = {
             "board": "PC_DESKTOP",
             "device_id": self.device_id,
             "storage_mode": "pc_fs",
             "hostname": socket.gethostname(),
-            "base_url": base_url,
+            "base_url": configured_base_url,
+            "configured_network_base_url": configured_base_url,
+            "local_pc_url": f"http://127.0.0.1:{self.app_config.port}",
+            "network_url": configured_base_url,
+            "bind_address": self.app_config.bind_host,
+            "port": self.app_config.port,
+            "detected_lan_ips": lan_ips,
+            "selected_lan_ip": self.app_config.selected_lan_ip,
+            "server_listening_all_interfaces": self.app_config.bind_host in {"0.0.0.0", "::"},
+            "firewall_rule": firewall,
+            "firewall_rule_installed": firewall.get("installed", False),
+            "auto_run": task,
+            "auto_run_enabled": task.get("enabled", False),
+            "run_mode": "Scheduled Task" if task.get("exists") else "Manual",
+            "supervisor_active": task.get("running", False),
+            "qr_loopback_warning": is_loopback_host(host),
+            "data_dir": str(self.data_dir),
+            "backups_dir": str(self.backups_dir),
             "brand_name": self.cloud_config.brand_name,
             "brand_logo_ref": self.cloud_config.brand_logo_ref,
             "backup_mode": self.cloud_config.backup_mode,
@@ -634,7 +1246,7 @@ class DesktopStore:
             "time_source": "system_clock",
             "wifi_connected": True,
             "wifi_ssid": "desktop",
-            "wifi_ip": socket.gethostbyname(socket.gethostname()) if socket.gethostname() else "127.0.0.1",
+            "wifi_ip": self.app_config.selected_lan_ip or (lan_ips[0] if lan_ips else "127.0.0.1"),
             "wifi_rssi": 0,
             "wifi_mode": "desktop",
             "wifi_ap_active": False,
@@ -687,12 +1299,12 @@ class DesktopStore:
         return payload
 
 
-def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, DesktopStore]:
+def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.0.0", port: int = 8787) -> tuple[Flask, DesktopStore]:
     app = Flask(__name__)
-    store = DesktopStore(data_dir=data_dir, firmware_ino=firmware_ino)
+    store = DesktopStore(data_dir=data_dir, firmware_ino=firmware_ino, bind_host=bind_host, port=port)
 
     def base_url() -> str:
-        return request.host_url.rstrip("/")
+        return store.configured_base_url()
 
     def arg(name: str, default: str = "") -> str:
         if request.is_json:
@@ -704,17 +1316,351 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
     def json_error(status: int, message: str):
         return jsonify({"error": message}), status
 
+    def desktop_settings_html() -> str:
+        html = store.index_html
+        panel = r'''
+      <h2>Desktop LAN Access</h2>
+      <p class="caption">Use this URL from phones and tablets on the same Wi-Fi/LAN. QR codes use this LAN URL.</p>
+      <div class="form-grid">
+        <label>
+          Local PC URL
+          <input id="desktop-local-url" type="text" readonly>
+        </label>
+        <label>
+          LAN access URL
+          <input id="desktop-network-url" type="text" readonly>
+        </label>
+        <label>
+          Selected host IP
+          <select id="desktop-lan-ip"></select>
+        </label>
+        <label>
+          QR/base URL
+          <input id="desktop-base-url" type="text" placeholder="http://192.168.1.50:8787">
+        </label>
+      </div>
+      <div class="cloud-actions">
+        <button id="desktop-save-network-btn" type="button">Save LAN URL</button>
+        <button id="desktop-copy-lan-btn" type="button" class="secondary">Copy LAN URL</button>
+        <button id="desktop-network-test-btn" type="button" class="secondary">Network Test</button>
+      </div>
+      <pre id="desktop-network-status" class="cloud-status">Loading desktop network status...</pre>
+
+      <h2>Desktop Auto Run</h2>
+      <div class="form-grid">
+        <label class="span-2">
+          <input id="desktop-auto-toggle" type="checkbox">
+          Auto run and crash restart
+        </label>
+      </div>
+      <div class="cloud-actions">
+        <button id="desktop-apply-auto-btn" type="button">Apply Auto Run</button>
+        <button id="desktop-restart-btn" type="button" class="secondary">Restart App</button>
+        <button id="desktop-stop-btn" type="button" class="secondary">Stop App</button>
+        <button id="desktop-stop-disable-btn" type="button" class="secondary">Stop App And Disable Auto Run</button>
+      </div>
+      <pre id="desktop-run-status" class="cloud-status">Loading auto run status...</pre>
+
+      <h2>Import ESP32 SD Data</h2>
+      <div class="form-grid">
+        <label class="span-2">
+          SD card or copied SD folder
+          <input id="desktop-sd-path" type="text" placeholder="D:\ or C:\Path\To\SDCopy">
+        </label>
+        <label>
+          Import mode
+          <select id="desktop-sd-mode">
+            <option value="merge">Merge into current inventory</option>
+            <option value="backup_replace">Backup current data then replace</option>
+            <option value="replace">Replace current inventory</option>
+          </select>
+        </label>
+      </div>
+      <div class="cloud-actions">
+        <button id="desktop-backup-btn" type="button">Backup Current Data</button>
+        <input id="desktop-backup-file" type="file" accept=".zip">
+        <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
+        <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview SD Import</button>
+        <button id="desktop-import-sd-btn" type="button" class="secondary">Import SD Data</button>
+      </div>
+      <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
+'''
+        marker = '      <div class="cloud-actions">\n        <button id="save-cloud-btn" type="button">Save Storage And Branding Settings</button>'
+        if marker in html and "desktop-lan-ip" not in html:
+            html = html.replace(marker, panel + "\n" + marker)
+        script = r'''
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  async function json(url, options) {
+    const response = await fetch(url, options || {});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || data.message || `Request failed (${response.status})`);
+    return data;
+  }
+  async function post(url, body) {
+    return json(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+  }
+  function networkLines(s) {
+    return [
+      `Bind address: ${s.bind_address}`,
+      `Port: ${s.port}`,
+      `Detected LAN IPs: ${(s.detected_lan_ips || []).join(', ') || 'none'}`,
+      `Selected LAN IP/base URL: ${s.selected_lan_ip || ''} / ${s.configured_network_base_url || ''}`,
+      `Windows Firewall rule: ${s.firewall_rule_installed ? 'installed' : 'missing'} (${s.firewall_rule && s.firewall_rule.detail || ''})`,
+      `Listening on 0.0.0.0: ${s.server_listening_all_interfaces ? 'yes' : 'no'}`,
+      `Another device should open: ${s.network_url}`,
+      s.qr_loopback_warning ? 'Warning: QR codes point to localhost. Phones will not be able to open them.' : '',
+      '',
+      'Router checks: same Wi-Fi, guest isolation off, AP/client isolation off.'
+    ].filter(Boolean).join('\n');
+  }
+  async function loadDesktopStatus() {
+    if (!$('desktop-lan-ip')) return;
+    const s = await json('/api/status');
+    $('desktop-local-url').value = s.local_pc_url || '';
+    $('desktop-network-url').value = s.network_url || '';
+    $('desktop-base-url').value = s.configured_network_base_url || '';
+    $('desktop-lan-ip').innerHTML = (s.detected_lan_ips || []).map((ip) => `<option value="${ip}" ${ip === s.selected_lan_ip ? 'selected' : ''}>${ip}</option>`).join('');
+    $('desktop-auto-toggle').checked = Boolean(s.auto_run_enabled);
+    $('desktop-network-status').textContent = networkLines(s);
+    $('desktop-run-status').textContent = [
+      `Auto run: ${s.auto_run_enabled ? 'Enabled' : 'Disabled'}`,
+      `Run mode: ${s.run_mode}`,
+      `Supervisor active: ${s.supervisor_active ? 'yes' : 'no'}`
+    ].join('\n');
+  }
+  async function saveNetwork() {
+    await post('/api/desktop/settings', {selected_lan_ip: $('desktop-lan-ip').value, configured_network_base_url: $('desktop-base-url').value});
+    await loadDesktopStatus();
+  }
+  async function system(action) {
+    try {
+      const result = await post('/api/desktop/system', {action});
+      $('desktop-run-status').textContent = result.message || JSON.stringify(result, null, 2);
+      if (!action.includes('stop')) setTimeout(loadDesktopStatus, 600);
+    } catch (error) {
+      $('desktop-run-status').textContent = error.message;
+    }
+  }
+  async function applyAutoRun() {
+    try {
+      const result = await post('/api/desktop/system', {action: 'set_auto', enabled: $('desktop-auto-toggle').checked});
+      $('desktop-run-status').textContent = result.message || JSON.stringify(result, null, 2);
+      setTimeout(loadDesktopStatus, 600);
+    } catch (error) {
+      $('desktop-run-status').textContent = error.message;
+      setTimeout(loadDesktopStatus, 600);
+    }
+  }
+  async function previewSd() {
+    $('desktop-import-status').textContent = JSON.stringify(await json(`/api/desktop/sd/preview?path=${encodeURIComponent($('desktop-sd-path').value)}`), null, 2);
+  }
+  async function importSd() {
+    $('desktop-import-status').textContent = JSON.stringify(await post('/api/desktop/sd/import', {path: $('desktop-sd-path').value, mode: $('desktop-sd-mode').value}), null, 2);
+  }
+  async function backup() {
+    const result = await post('/api/desktop/backup', {});
+    $('desktop-import-status').textContent = JSON.stringify(result, null, 2);
+    if (result.backup) window.location.href = `/api/desktop/backup/download?name=${encodeURIComponent(result.backup)}`;
+  }
+  async function importBackup() {
+    const file = $('desktop-backup-file').files[0];
+    if (!file) {
+      $('desktop-import-status').textContent = 'Choose a backup ZIP first.';
+      return;
+    }
+    const form = new FormData();
+    form.append('backup', file);
+    const response = await fetch('/api/desktop/backup/import', {method:'POST', body: form});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `Import failed (${response.status})`);
+    $('desktop-import-status').textContent = JSON.stringify(data, null, 2);
+  }
+  document.addEventListener('DOMContentLoaded', () => {
+    if (!$('desktop-lan-ip')) return;
+    $('desktop-save-network-btn').addEventListener('click', saveNetwork);
+    $('desktop-copy-lan-btn').addEventListener('click', () => navigator.clipboard && navigator.clipboard.writeText($('desktop-network-url').value));
+    $('desktop-network-test-btn').addEventListener('click', async () => $('desktop-network-status').textContent = JSON.stringify(await json('/api/desktop/network-test'), null, 2));
+    $('desktop-apply-auto-btn').addEventListener('click', applyAutoRun);
+    $('desktop-auto-toggle').addEventListener('change', applyAutoRun);
+    $('desktop-restart-btn').addEventListener('click', () => system('restart'));
+    $('desktop-stop-btn').addEventListener('click', () => system('stop'));
+    $('desktop-stop-disable-btn').addEventListener('click', () => system('stop_disable_auto'));
+    $('desktop-preview-sd-btn').addEventListener('click', previewSd);
+    $('desktop-import-sd-btn').addEventListener('click', importSd);
+    $('desktop-backup-btn').addEventListener('click', backup);
+    $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => $('desktop-import-status').textContent = e.message));
+    loadDesktopStatus();
+  });
+})();
+</script>
+'''
+        return html.replace("</body>", script + "\n</body>") if "loadDesktopStatus" not in html else html
+
+    def desktop_item_html() -> str:
+        html = store.item_html
+        panel = r'''
+    <section class="info-panel" id="desktop-edit-panel">
+      <h2>Edit Item</h2>
+      <div class="meta-grid">
+        <label>Part number<input id="desktop-edit-id" type="text"></label>
+        <label>Name<input id="desktop-edit-name" type="text"></label>
+        <label>Category<input id="desktop-edit-category" type="text"></label>
+        <label>Quantity<input id="desktop-edit-qty" type="number" min="0"></label>
+        <label>QR/UPC<input id="desktop-edit-qr" type="text"></label>
+        <label>Color<input id="desktop-edit-color" type="text"></label>
+        <label>Material<input id="desktop-edit-material" type="text"></label>
+        <label>Parent product / kit<input id="desktop-edit-bom-product" type="text"></label>
+        <label>Qty used in parent<input id="desktop-edit-bom-qty" type="number" min="0"></label>
+        <label>Image<input id="desktop-edit-image" type="file" accept="image/*"></label>
+      </div>
+      <div class="actions">
+        <button id="desktop-save-item-btn" type="button">Save Item</button>
+        <button id="desktop-upload-image-btn" type="button" class="secondary">Upload/Replace Image</button>
+        <button id="desktop-remove-image-btn" type="button" class="secondary">Remove Image</button>
+      </div>
+      <div id="desktop-edit-status" class="status"></div>
+    </section>
+'''
+        marker = '    <section class="manual-panel">'
+        if marker in html and "desktop-edit-panel" not in html:
+            html = html.replace(marker, panel + "\n" + marker)
+        script = r'''
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(window.location.search);
+  let currentId = params.get('id') || '';
+  let currentItem = null;
+  async function json(url, options) {
+    const response = await fetch(url, options || {});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+    return data;
+  }
+  function status(text, bad) {
+    const el = $('desktop-edit-status');
+    if (el) { el.textContent = text || ''; el.className = bad ? 'status error' : 'status'; }
+  }
+  async function loadEdit() {
+    if (!$('desktop-edit-panel') || !currentId) return;
+    const payload = await json(`/api/item?id=${encodeURIComponent(currentId)}`);
+    currentItem = payload.item;
+    $('desktop-edit-id').value = currentItem.id || '';
+    $('desktop-edit-name').value = currentItem.part_name || '';
+    $('desktop-edit-category').value = currentItem.category || '';
+    $('desktop-edit-qty').value = currentItem.qty || 0;
+    $('desktop-edit-qr').value = currentItem.qr_code || '';
+    $('desktop-edit-color').value = currentItem.color || '';
+    $('desktop-edit-material').value = currentItem.material || '';
+    $('desktop-edit-bom-product').value = currentItem.bom_product || '';
+    $('desktop-edit-bom-qty').value = currentItem.bom_qty || 0;
+  }
+  async function saveItem() {
+    const body = {
+      original_id: currentId,
+      id: $('desktop-edit-id').value,
+      part_name: $('desktop-edit-name').value,
+      category: $('desktop-edit-category').value,
+      qty: $('desktop-edit-qty').value,
+      qr_code: $('desktop-edit-qr').value,
+      color: $('desktop-edit-color').value,
+      material: $('desktop-edit-material').value,
+      bom_product: $('desktop-edit-bom-product').value,
+      bom_qty: $('desktop-edit-bom-qty').value,
+      image_ref: currentItem && currentItem.image_ref || ''
+    };
+    const saved = await json('/api/items/update', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    currentId = saved.item.id;
+    history.replaceState(null, '', `/item?id=${encodeURIComponent(currentId)}`);
+    status('Item saved.');
+    setTimeout(() => window.location.reload(), 500);
+  }
+  async function uploadImage() {
+    const file = $('desktop-edit-image').files[0];
+    if (!file) return status('Choose an image first.', true);
+    const form = new FormData();
+    form.append('id', currentId);
+    form.append('image', file);
+    await json('/api/items/image', {method:'POST', body: form});
+    status('Image saved.');
+    setTimeout(() => window.location.reload(), 500);
+  }
+  async function removeImage() {
+    await json('/api/items/image', {method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: currentId})});
+    status('Image removed.');
+    setTimeout(() => window.location.reload(), 500);
+  }
+  document.addEventListener('DOMContentLoaded', () => {
+    if (!$('desktop-edit-panel')) return;
+    $('desktop-save-item-btn').addEventListener('click', () => saveItem().catch((e) => status(e.message, true)));
+    $('desktop-upload-image-btn').addEventListener('click', () => uploadImage().catch((e) => status(e.message, true)));
+    $('desktop-remove-image-btn').addEventListener('click', () => removeImage().catch((e) => status(e.message, true)));
+    loadEdit().catch((e) => status(e.message, true));
+  });
+})();
+</script>
+'''
+        return html.replace("</body>", script + "\n</body>") if "loadEdit()" not in html else html
+
+    def desktop_inventory_html() -> str:
+        html = store.index_html
+        script = r'''
+<script>
+(function(){
+  async function exactOpen(value) {
+    const q = String(value || '').trim();
+    if (!q) return;
+    const response = await fetch(`/api/items?q=${encodeURIComponent(q)}`);
+    const data = await response.json().catch(() => ({items: []}));
+    const items = Array.isArray(data.items) ? data.items : [];
+    const hit = items.find((item) => [item.id, item.qr_code, item.qr_link].some((v) => String(v || '').toLowerCase() === q.toLowerCase()));
+    if (hit) window.location.href = `/item?id=${encodeURIComponent(hit.id)}`;
+  }
+  document.addEventListener('DOMContentLoaded', () => {
+    const search = document.getElementById('search-input');
+    if (!search) return;
+    search.focus();
+    search.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') exactOpen(search.value);
+    });
+  });
+})();
+</script>
+'''
+        return html.replace("</body>", script + "\n</body>") if "exactOpen(value)" not in html else html
+
+    def labels_html() -> str:
+        return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stingray QR Labels</title><style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:16px;background:#f7f7f7;color:#182230}button,select,input{padding:8px;margin:4px}.toolbar{margin-bottom:12px}.labels{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}.label{background:white;border:1px dashed #777;padding:8px;text-align:center;break-inside:avoid}.label img{width:116px;height:116px}.part{font-weight:700}.name{font-size:13px}@media print{.toolbar{display:none}body{background:white}.label{page-break-inside:avoid}}</style></head>
+<body><div class="toolbar"><a href="/">Inventory</a> <a href="/settings">Settings</a><br><select id="category"><option value="all">All</option><option value="part">Parts</option><option value="product">Products</option><option value="kit">Kits</option></select><input id="search" placeholder="Search labels"><button id="print">Print</button></div><div id="labels" class="labels"></div>
+<script>
+function esc(v){return String(v||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function load(){const q=document.getElementById('search').value||'';const cat=document.getElementById('category').value;const r=await fetch(`/api/items?category=${encodeURIComponent(cat)}&q=${encodeURIComponent(q)}`);const d=await r.json();document.getElementById('labels').innerHTML=(d.items||[]).map(i=>`<div class="label"><img src="/api/qr.svg?data=${encodeURIComponent(i.qr_link)}"><div class="part">${esc(i.id)}</div><div class="name">${esc(i.part_name)}</div></div>`).join('')}
+document.getElementById('category').addEventListener('change',load);document.getElementById('search').addEventListener('input',load);document.getElementById('print').addEventListener('click',()=>window.print());load();
+</script></body></html>"""
+
     @app.route("/", methods=["GET"])
     @app.route("/settings", methods=["GET"])
     @app.route("/orders", methods=["GET"])
     @app.route("/orders/view", methods=["GET"])
     @app.route("/orders/fulfill", methods=["GET"])
     def handle_index_page():
+        if request.path == "/settings":
+            return Response(desktop_settings_html(), mimetype="text/html; charset=utf-8")
+        if request.path == "/":
+            return Response(desktop_inventory_html(), mimetype="text/html; charset=utf-8")
         return Response(store.index_html, mimetype="text/html; charset=utf-8")
 
     @app.route("/item", methods=["GET"])
     def handle_item_page():
-        return Response(store.item_html, mimetype="text/html; charset=utf-8")
+        return Response(desktop_item_html(), mimetype="text/html; charset=utf-8")
+
+    @app.route("/labels", methods=["GET"])
+    def handle_labels_page():
+        return Response(labels_html(), mimetype="text/html; charset=utf-8")
 
     @app.route("/qr.svg", methods=["GET"])
     @app.route("/api/qr.svg", methods=["GET"])
@@ -736,6 +1682,111 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
     @app.route("/api/status", methods=["GET"])
     def handle_status():
         return jsonify(store.status_json(base_url()))
+
+    @app.route("/api/desktop/settings", methods=["POST"])
+    def handle_desktop_settings():
+        selected_ip = sanitize_field(arg("selected_lan_ip", store.app_config.selected_lan_ip))
+        configured_base_url = normalize_base_url(arg("configured_network_base_url", store.app_config.configured_network_base_url))
+        with store.lock:
+            if selected_ip:
+                store.app_config.selected_lan_ip = selected_ip
+            if configured_base_url:
+                store.app_config.configured_network_base_url = configured_base_url
+            else:
+                store.app_config.configured_network_base_url = f"http://{store.app_config.selected_lan_ip}:{store.app_config.port}"
+            store._save_app_config()
+            store.append_device_log("desktop_settings_saved", f"LAN URL set to {store.configured_base_url()}")
+        return jsonify(store.status_json(base_url()))
+
+    @app.route("/api/desktop/network-test", methods=["GET"])
+    def handle_desktop_network_test():
+        status = store.status_json(base_url())
+        return jsonify(
+            {
+                "ok": True,
+                "local_pc_url": status["local_pc_url"],
+                "another_device_should_open": status["network_url"],
+                "checks": {
+                    "server_listening_on_all_interfaces": status["server_listening_all_interfaces"],
+                    "firewall_rule_installed": status["firewall_rule_installed"],
+                    "qr_url_is_not_loopback": not status["qr_loopback_warning"],
+                },
+            }
+        )
+
+    @app.route("/api/desktop/backup", methods=["POST"])
+    def handle_desktop_backup():
+        backup = store.create_backup_zip("manual")
+        return jsonify({"ok": True, "backup": backup.name, "path": str(backup)})
+
+    @app.route("/api/desktop/backup/download", methods=["GET"])
+    def handle_desktop_backup_download():
+        name = re.sub(r"[^A-Za-z0-9_.-]", "", Path(arg("name")).name)
+        path = store.backups_dir / name
+        if not name or not path.exists() or not path.is_file() or path.suffix.lower() != ".zip":
+            return json_error(404, "Backup not found.")
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.route("/api/desktop/backup/import", methods=["POST"])
+    def handle_desktop_backup_import():
+        if not request.files:
+            return json_error(400, "No backup ZIP uploaded.")
+        uploaded = next(iter(request.files.values()))
+        if not uploaded or not uploaded.filename.lower().endswith(".zip"):
+            return json_error(400, "Backup must be a ZIP file.")
+        store.backups_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = store.backups_dir / f"uploaded-{int(time.time())}-{sanitize_filename_stem(uploaded.filename)}.zip"
+        uploaded.save(temp_path)
+        try:
+            return jsonify(store.restore_backup_zip(temp_path))
+        except zipfile.BadZipFile:
+            return json_error(400, "Invalid backup ZIP.")
+
+    @app.route("/api/desktop/sd/preview", methods=["GET"])
+    def handle_desktop_sd_preview():
+        folder = normalize_local_folder_path(arg("path"))
+        if not folder.exists() or not folder.is_dir():
+            return json_error(404, "SD folder not found.")
+        try:
+            return jsonify(store.preview_sd_import(folder))
+        except ValueError as exc:
+            return json_error(400, str(exc))
+
+    @app.route("/api/desktop/sd/import", methods=["POST"])
+    def handle_desktop_sd_import():
+        mode = trim_copy(arg("mode", "merge"))
+        if mode not in {"merge", "replace", "backup_replace"}:
+            return json_error(400, "Invalid import mode.")
+        try:
+            return jsonify(store.import_sd_folder(normalize_local_folder_path(arg("path")), mode))
+        except ValueError as exc:
+            return json_error(400, str(exc))
+
+    @app.route("/api/desktop/system", methods=["POST"])
+    def handle_desktop_system():
+        action = trim_copy(arg("action"))
+        if action in {"enable_auto", "disable_auto", "set_auto", "stop_disable_auto"}:
+            enabled = truthy(arg("enabled")) if action == "set_auto" else action == "enable_auto"
+            ok, detail = set_windows_autorun(enabled)
+            if action == "stop_disable_auto":
+                if not ok:
+                    message = "Could not disable auto run, so the app was not stopped."
+                    return jsonify({"ok": False, "error": message, "message": message, "detail": detail}), 500
+                threading.Timer(0.5, lambda: os._exit(0)).start()
+                return jsonify({"ok": True, "message": "Auto run disabled. App is stopping.", "detail": detail})
+            message = ("Auto run enabled." if enabled else "Auto run disabled.") if ok else f"Could not {'enable' if enabled else 'disable'} auto run."
+            status_code = 200 if ok else 500
+            payload = {"ok": ok, "message": message, "detail": detail}
+            if not ok:
+                payload["error"] = message
+            return jsonify(payload), status_code
+        if action == "stop":
+            threading.Timer(0.5, lambda: os._exit(0)).start()
+            return jsonify({"ok": True, "message": "App is stopping. If auto run is still enabled, supervisor may restart it."})
+        if action == "restart":
+            threading.Timer(0.5, lambda: os._exit(3)).start()
+            return jsonify({"ok": True, "message": "App restart requested."})
+        return json_error(400, "Unknown action.")
 
     @app.route("/api/sd/mount", methods=["POST"])
     def handle_sd_mount():
@@ -941,6 +1992,53 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
         store.append_device_log("image_uploaded", f"Stored image asset at {storage_path}")
         return jsonify({"ok": True, "storage_path": storage_path, "image_ref": image_ref}), 201
 
+    def save_item_image_upload(item_id: str) -> str:
+        if not request.files:
+            raise ValueError("No image was uploaded.")
+        file = next(iter(request.files.values()))
+        if not file or not file.filename:
+            raise ValueError("No image was uploaded.")
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in ALLOWED_IMAGE_EXTENSIONS:
+            raise ValueError("Unsupported image type. Use JPG, PNG, GIF, BMP, or WEBP.")
+        stem = sanitize_filename_stem(f"{item_id}_{Path(file.filename).stem}")
+        candidate = store.images_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
+        counter = 2
+        while candidate.exists():
+            candidate = store.images_dir / f"{int(time.time() * 1000)}_{stem}_{counter}{suffix}"
+            counter += 1
+        file.save(candidate)
+        storage_path = "/" + candidate.relative_to(store.data_dir).as_posix()
+        return "/api/files?path=" + quote(storage_path, safe="")
+
+    @app.route("/api/items/image", methods=["POST", "DELETE"])
+    def handle_item_image():
+        item_id = trim_copy(arg("id"))
+        if not item_id:
+            return json_error(400, "Missing part number.")
+        with store.lock:
+            idx = store.find_item_index(item_id)
+            if idx < 0:
+                return json_error(404, "Item not found.")
+            if request.method == "DELETE":
+                store.create_backup_zip("before_remove_item_image")
+                store.items[idx].image_ref = ""
+                store.items[idx].updated_at = current_timestamp()
+                store._save_inventory()
+                store.append_transaction(item_id, "edit_image", 0, store.items[idx].qty, "image removed")
+                return jsonify(store.item_payload(store.items[idx], base_url()))
+            try:
+                image_ref = save_item_image_upload(item_id)
+            except ValueError as exc:
+                return json_error(400, str(exc))
+            if store.items[idx].image_ref:
+                store.create_backup_zip("before_replace_item_image")
+            store.items[idx].image_ref = image_ref
+            store.items[idx].updated_at = current_timestamp()
+            store._save_inventory()
+            store.append_transaction(item_id, "edit_image", 0, store.items[idx].qty, "image updated")
+            return jsonify(store.item_payload(store.items[idx], base_url()))
+
     @app.route("/api/items", methods=["GET"])
     def handle_items_list():
         category_filter = arg("category", "all")
@@ -957,7 +2055,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
     def handle_get_item():
         item_id = trim_copy(arg("id"))
         if not item_id:
-            return json_error(400, "Missing or invalid item id.")
+            return json_error(400, "Missing or invalid part number.")
         with store.lock:
             idx = store.find_item_index(item_id)
             if idx < 0:
@@ -969,7 +2067,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
         category = normalize_category(arg("category", DEFAULT_CATEGORY))
         part_name = sanitize_field(arg("part_name"))
         if not part_name:
-            return json_error(400, "Part name is required.")
+            return json_error(400, "Name is required.")
         item_id = trim_copy(sanitize_field(arg("id")))
         if not item_id:
             return json_error(400, "Part number is required.")
@@ -992,9 +2090,9 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
         if bom_product and bom_qty == 0:
             bom_qty = 1
         if not bom_product and bom_qty > 0:
-            return json_error(400, "BOM product is required when BOM quantity is set.")
+            return json_error(400, "Parent product or kit is required when quantity used in parent is set.")
         if category != "part" and (bom_product or bom_qty > 0):
-            return json_error(400, "Only parts can be assigned to a BOM product or kit.")
+            return json_error(400, "Only parts can be assigned to a parent product or kit.")
 
         qty_raw = arg("qty", "0")
         qty_parsed = parse_int(qty_raw)
@@ -1005,7 +2103,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
 
         with store.lock:
             if store.find_item_index(item_id) >= 0:
-                return json_error(409, "Item id already exists.")
+                return json_error(409, "Part number already exists.")
             item = ItemRecord(
                 id=item_id,
                 category=category,
@@ -1029,15 +2127,72 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
             store.append_device_log("item_created", f"{item.id} saved with qty {qty_parsed}")
             return jsonify(store.item_payload(store.items[saved_idx], base_url())), 201
 
+    @app.route("/api/items/update", methods=["POST"])
+    def handle_update_item():
+        original_id = trim_copy(arg("original_id", arg("id")))
+        new_id = trim_copy(sanitize_field(arg("id")))
+        if not original_id or not new_id:
+            return json_error(400, "Part number is required.")
+        qty = parse_int(arg("qty", "0"))
+        bom_qty = parse_int(arg("bom_qty", "0"))
+        if qty is None or qty < 0:
+            return json_error(400, "Quantity cannot be negative.")
+        if bom_qty is None or bom_qty < 0:
+            return json_error(400, "BOM quantity cannot be negative.")
+        category = normalize_category(arg("category", DEFAULT_CATEGORY))
+        part_name = sanitize_field(arg("part_name"))
+        if not part_name:
+            return json_error(400, "Name is required.")
+        bom_product = sanitize_field(arg("bom_product"))
+        if bom_product and bom_qty == 0:
+            bom_qty = 1
+        if not bom_product and bom_qty > 0:
+            return json_error(400, "Parent product or kit is required when quantity used in parent is set.")
+        if category != "part" and (bom_product or bom_qty > 0):
+            return json_error(400, "Only parts can be assigned to a parent product or kit.")
+        with store.lock:
+            idx = store.find_item_index(original_id)
+            if idx < 0:
+                return json_error(404, "Item not found.")
+            duplicate_idx = store.find_item_index(new_id)
+            if duplicate_idx >= 0 and duplicate_idx != idx:
+                return json_error(409, "Part number already exists.")
+            previous = ItemRecord(**asdict(store.items[idx]))
+            item = store.items[idx]
+            item.id = new_id
+            item.category = category
+            item.part_name = part_name
+            item.qr_code = sanitize_field(arg("qr_code"))
+            item.color = sanitize_field(arg("color"))
+            item.material = sanitize_field(arg("material"))
+            item.qty = qty
+            item.image_ref = sanitize_field(arg("image_ref", item.image_ref))
+            item.bom_product = bom_product
+            item.bom_qty = bom_qty
+            item.updated_at = current_timestamp()
+            if normalize_lookup_value(original_id) != normalize_lookup_value(new_id):
+                for row in store.items:
+                    if normalize_lookup_value(row.bom_product) == normalize_lookup_value(original_id):
+                        row.bom_product = new_id
+            store.items.sort(key=lambda row: normalize_lookup_value(row.id))
+            if not store._save_inventory():
+                store.items[idx] = previous
+                return json_error(500, "Failed to persist inventory to disk.")
+            saved_idx = store.find_item_index(new_id)
+            store.append_transaction(new_id, "edit_item", qty - previous.qty, qty, f"edited from {original_id}")
+            store.append_device_log("item_updated", f"{original_id} updated to {new_id}")
+            return jsonify(store.item_payload(store.items[saved_idx], base_url()))
+
     @app.route("/api/items/remove", methods=["POST"])
     def handle_remove_item():
         item_id = trim_copy(arg("id"))
         if not item_id:
-            return json_error(400, "Missing or invalid item id.")
+            return json_error(400, "Missing or invalid part number.")
         with store.lock:
             idx = store.find_item_index(item_id)
             if idx < 0:
                 return json_error(404, "Item not found.")
+            store.create_backup_zip("before_delete_item")
             removed = store.items[idx]
             del store.items[idx]
             if not store._save_inventory():
@@ -1051,7 +2206,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
     def handle_adjust_item():
         item_id = trim_copy(arg("id"))
         if not item_id:
-            return json_error(400, "Missing or invalid item id.")
+            return json_error(400, "Missing or invalid part number.")
         delta = parse_int(arg("delta", ""))
         if delta is None:
             return json_error(400, "Missing or invalid delta.")
@@ -1080,7 +2235,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None) -> tuple[Flask, Deskto
     def handle_set_item_qty():
         item_id = trim_copy(arg("id"))
         if not item_id:
-            return json_error(400, "Missing or invalid item id.")
+            return json_error(400, "Missing or invalid part number.")
         qty = parse_int(arg("qty", ""))
         if qty is None:
             return json_error(400, "Missing or invalid quantity.")
@@ -1186,28 +2341,30 @@ def run_self_test(app: Flask) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stingray Inventory Desktop App")
-    parser.add_argument("--data-dir", type=Path, default=Path.home() / "StingrayInventoryDesktop" / "data")
+    parser.add_argument("--data-dir", type=Path, default=Path(os.environ.get("PROGRAMDATA", str(Path.home()))) / "StingrayInventoryDesktop" / "data")
     parser.add_argument(
         "--firmware-ino",
         type=Path,
         default=default_firmware_ino_path(),
     )
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--open-browser", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
-    app, store = create_app(data_dir=args.data_dir, firmware_ino=args.firmware_ino)
+    app, store = create_app(data_dir=args.data_dir, firmware_ino=args.firmware_ino, bind_host=args.host, port=args.port)
     if args.self_test:
         run_self_test(app)
         print("Self-test passed.")
         return
 
     if args.open_browser:
-        webbrowser.open(f"http://{args.host}:{args.port}/")
+        webbrowser.open(f"http://127.0.0.1:{args.port}/")
 
-    print(f"Stingray Desktop running on http://{args.host}:{args.port}/")
+    print(f"Stingray Desktop listening on http://{args.host}:{args.port}/")
+    print(f"Local PC URL: http://127.0.0.1:{args.port}/")
+    print(f"LAN URL: {store.configured_base_url()}/")
     print(f"Data directory: {store.data_dir}")
     app.run(host=args.host, port=args.port, debug=False)
 
