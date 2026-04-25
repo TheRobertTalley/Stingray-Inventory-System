@@ -40,6 +40,7 @@ Stingray Inventory System is now an ESP32-hosted inventory app.
 You can now run Stingray Inventory directly on Windows while preserving existing SD data formats.
 
 The Windows desktop app is LAN-first: it listens on `0.0.0.0:8787`, remains available on the PC at `http://127.0.0.1:8787`, and lets Settings choose the LAN base URL used by QR codes and exports.
+Backups are portable between computers and restore inventory, orders, logs, and images without carrying over the old PC's LAN settings.
 
 - Desktop entry point: `desktop_app/stingray_desktop_app.py`
 - One-command setup/run on Windows: `desktop_app/install_and_run.ps1`

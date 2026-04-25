@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -210,6 +212,52 @@ class DesktopAppTests(unittest.TestCase):
         labels = client.get("/labels").get_data(as_text=True)
         self.assertIn("/api/qr.svg?data=", labels)
         self.assertIn("Stingray QR Labels", labels)
+
+    def test_backup_zip_handles_esp32_fat_timestamps_before_1980(self):
+        client, store = self.make_client()
+        client.post("/api/items/add", json={"id": "OLDTIME", "part_name": "Old Timestamp", "qty": "1"})
+        old_timestamp = 315507600
+        for path in (store.inventory_file, store.transaction_file):
+            os.utime(path, (old_timestamp, old_timestamp))
+
+        response = client.post("/api/desktop/backup")
+        self.assertEqual(response.status_code, 200)
+        backup_path = store.backups_dir / response.get_json()["backup"]
+        with ZipFile(backup_path) as zf:
+            names = zf.namelist()
+            inventory_info = zf.getinfo("inventory.csv")
+
+        self.assertIn("inventory.csv", names)
+        self.assertIn("transactions.csv", names)
+        self.assertGreaterEqual(inventory_info.date_time[0], 1980)
+
+    def test_backup_zip_is_portable_and_does_not_restore_desktop_network_settings(self):
+        client, store = self.make_client()
+        client.post("/api/desktop/settings", json={"selected_lan_ip": "192.168.1.55", "configured_network_base_url": "http://192.168.1.55:8787"})
+        client.post("/api/items/add", json={"id": "PORT", "part_name": "Portable", "qty": "1"})
+
+        backup = client.post("/api/desktop/backup").get_json()
+        backup_path = store.backups_dir / backup["backup"]
+        with ZipFile(backup_path) as zf:
+            names = set(zf.namelist())
+
+        self.assertNotIn("desktop_config.json", names)
+        self.assertIn("inventory.csv", names)
+        self.assertIn("orders.json", names)
+
+        store.app_config.selected_lan_ip = "10.0.0.5"
+        store.app_config.configured_network_base_url = "http://10.0.0.5:8787"
+        store._save_app_config()
+        restore = client.post(
+            "/api/desktop/backup/import",
+            data={"backup": (io.BytesIO(backup_path.read_bytes()), backup_path.name)},
+            content_type="multipart/form-data",
+        ).get_json()
+
+        status = client.get("/api/status").get_json()
+        self.assertTrue(restore["ok"])
+        self.assertEqual(status["selected_lan_ip"], "10.0.0.5")
+        self.assertEqual(status["network_url"], "http://10.0.0.5:8787")
 
     def test_existing_ui_gets_desktop_settings_and_item_edit_controls(self):
         client, _ = self.make_client()

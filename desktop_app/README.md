@@ -143,6 +143,7 @@ On the Settings page:
 - Backup ZIPs are stored in `C:\ProgramData\StingrayInventoryDesktop\backups`.
 
 The app creates an automatic ZIP backup before SD import, backup restore, item delete, image removal, and image replacement.
+Portable backups do not include per-PC LAN settings, so restoring on another computer picks up that computer's network settings instead of the original one.
 
 ## Item Editing
 

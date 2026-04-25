@@ -927,26 +927,36 @@ class DesktopStore:
     def create_backup_zip(self, reason: str) -> Path:
         self.backups_dir.mkdir(parents=True, exist_ok=True)
         target = self.backup_zip_path()
-        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(
-                "manifest.json",
-                json.dumps({"created_at": current_timestamp(), "reason": reason, "item_count": len(self.items)}, indent=2) + "\n",
-            )
-            for name in IMPORT_COPY_FILES + [APP_CONFIG_FILE]:
-                path = self.data_dir / name
-                if path.exists() and path.is_file():
-                    zf.write(path, name)
-            if self.images_dir.exists():
-                for path in self.images_dir.rglob("*"):
-                    if path.is_file():
-                        zf.write(path, path.relative_to(self.data_dir).as_posix())
+        temp_target = target.with_name(f"{target.stem}.tmp{target.suffix}")
+        if temp_target.exists():
+            temp_target.unlink()
+        try:
+            with zipfile.ZipFile(temp_target, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as zf:
+                zf.writestr(
+                    "manifest.json",
+                    json.dumps({"created_at": current_timestamp(), "reason": reason, "item_count": len(self.items)}, indent=2) + "\n",
+                )
+                for name in IMPORT_COPY_FILES:
+                    path = self.data_dir / name
+                    if path.exists() and path.is_file():
+                        zf.write(path, name)
+                if self.images_dir.exists():
+                    for path in self.images_dir.rglob("*"):
+                        if path.is_file():
+                            zf.write(path, path.relative_to(self.data_dir).as_posix())
+            if target.exists():
+                target.unlink()
+            temp_target.replace(target)
+        except Exception:
+            temp_target.unlink(missing_ok=True)
+            raise
         self.append_device_log("backup_created", f"{target.name} ({reason})")
         return target
 
     def restore_backup_zip(self, zip_path: Path) -> dict[str, Any]:
         backup = self.create_backup_zip("before_backup_restore")
         restored: list[str] = []
-        allowed_names = set(IMPORT_COPY_FILES + [APP_CONFIG_FILE])
+        allowed_names = set(IMPORT_COPY_FILES)
         with zipfile.ZipFile(zip_path, "r") as zf:
             for raw_name in zf.namelist():
                 name = raw_name.replace("\\", "/").lstrip("/")
