@@ -39,7 +39,7 @@ Default data directory:
 
 Legacy data migration:
 
-- Existing installs from the older Stingray desktop build are detected and copied forward from `C:\ProgramData\StingrayInventoryDesktop\data` the first time the new app starts against an empty `Inventory` data tree.
+- Existing installs from the older Stingray desktop build are detected and copied forward from the legacy `C:\ProgramData\StingrayInventoryDesktop\` tree the first time the new app starts against an empty `Inventory` data tree.
 
 ## Using Existing SD Data
 
@@ -87,12 +87,16 @@ One-click install from the generated ZIP:
 - Unzip `dist\StingrayInventoryDesktop-Installer.zip`
 - Double-click `Install Inventory.cmd`
 - Approve the Windows UAC prompt
+- On first launch, the browser opens the first-run setup wizard after the LAN URL is reachable.
+- The installer removes old app binaries and legacy shortcuts first, then preserves and imports existing inventory data from older `ProgramData` trees.
 
 You can override branding during install:
 
 ```powershell
-.\install_desktop_app.ps1 -BrandName "Inventory" -BrandLogoPath "C:\Users\TALLEY\Pictures\stingray logo.png"
+.\install_desktop_app.ps1 -BrandName "Inventory" -BrandLogoPath "C:\Path\To\Your\Logo.png"
 ```
+
+If no custom logo is supplied, the bundled `desktop_app/branding/stingray-logo.png` is used automatically.
 
 By default, install creates:
 
@@ -106,21 +110,26 @@ By default, install creates:
 - Desktop shortcut: `Inventory`
 - SYSTEM startup task: `Inventory (System Startup)` (starts before login)
 - Windows Firewall rule: `Inventory LAN` for TCP port `8787` on Private and Public networks
+- First-run setup wizard: choose the LAN URL and create the admin PIN
+- Health dashboard: green/red status plus `Copy LAN URL` and `Test This PC`
+- Admin PIN gate: advanced settings stay locked until the PIN is unlocked
+- Legacy installs: old app files and shortcuts are removed before the new install is copied in, while inventory data is preserved and imported when found.
 
 Important:
 
 - Installer auto-elevates and requests administrator approval using UAC.
 - The startup task runs as `SYSTEM` and keeps the app alive (auto restart on crash).
 - Settings includes an **Auto run and crash restart** checkbox for turning that startup task on or off.
-- Updates replace app files only. Inventory data remains in `C:\ProgramData\Inventory\data`.
+- The installer grants the desktop app write access to `C:\ProgramData\Inventory\` so config, logs, backups, and data all stay writable after install.
+- Updates replace app files only. Inventory data remains in `C:\ProgramData\Inventory\data`, and legacy inventory files are imported when present.
 
 ## LAN / QR Setup
 
-1. Open `http://127.0.0.1:8787/settings` on the inventory PC.
-2. In **Desktop LAN Access**, select the correct LAN IP, usually `192.168.x.x`.
+1. Open the first-run wizard at `http://127.0.0.1:8787/setup` on the inventory PC.
+2. Pick the correct LAN IP, usually `192.168.x.x`.
 3. Confirm the QR/base URL is `http://<LAN-IP>:8787`.
-4. Click **Save LAN URL**.
-5. Use **Copy LAN URL** or **Network Test** to tell another device what URL to try.
+4. Create the admin PIN and finish setup.
+5. In Settings, use **Copy LAN URL** or **Test This PC** to verify the LAN URL and health dashboard.
 
 TP-Link checks if phones cannot connect:
 
@@ -131,7 +140,7 @@ TP-Link checks if phones cannot connect:
 
 ## SD Card Import
 
-On the Settings page, use **Import ESP32 SD Data**:
+After unlocking admin settings, use **Import ESP32 SD Data**:
 
 - Enter the SD card drive or copied SD folder path.
 - Preview first.
@@ -142,7 +151,7 @@ Supported SD files include `inventory.csv`, `transactions.csv`, `orders.json`, l
 
 ## Backup ZIP Export / Import
 
-On the Settings page:
+After unlocking admin settings:
 
 - **Backup Current Data** creates and downloads a ZIP backup.
 - **Import Backup ZIP** restores a ZIP backup.
@@ -209,6 +218,7 @@ Default behavior:
 - Removes startup task and shortcuts
 - Removes app files
 - Keeps data at `C:\ProgramData\Inventory\data`
+- Also removes legacy Program Files app folders and legacy shortcuts from the old Stingray install name.
 
 To also remove data:
 

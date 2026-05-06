@@ -190,11 +190,15 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue((store.backups_dir / result["backup"]).exists())
         self.assertEqual(result["items_imported"], 1)
         status = client.get("/api/status").get_json()
+        health = client.get("/api/desktop/health").get_json()
         self.assertEqual(status["app_name"], "Inventory")
         self.assertIn("network_url", status)
         self.assertIn("auto_run_enabled", status)
         self.assertIn("firewall_rule_name", status)
         self.assertIn("auto_run_task_name", status)
+        self.assertNotIn("health", status)
+        self.assertIn("overall_ok", health)
+        self.assertIn("checks", health)
 
     def test_backup_zip_export_import_and_labels_page(self):
         client, store = self.make_client()
@@ -328,6 +332,63 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         mocked.assert_called_once_with(True)
         self.assertIn("could not enable", response.get_json()["message"].lower())
+
+    def test_first_run_setup_wizard_and_admin_pin_flow(self):
+        client, _ = self.make_client()
+
+        setup_html = client.get("/setup").get_data(as_text=True)
+        self.assertIn("desktop-setup-wizard", setup_html)
+        self.assertIn("First-Run Setup", setup_html)
+
+        setup = client.post(
+            "/api/desktop/setup",
+            json={
+                "selected_lan_ip": "192.168.1.77",
+                "configured_network_base_url": "http://192.168.1.77:8787",
+                "admin_pin": "2468",
+                "admin_pin_confirm": "2468",
+            },
+        )
+        self.assertEqual(setup.status_code, 200)
+        payload = setup.get_json()
+        self.assertTrue(payload["status"]["setup_complete"])
+        self.assertTrue(payload["status"]["admin_pin_configured"])
+        self.assertTrue(payload["status"]["admin_unlocked"])
+
+        locked = client.post("/api/desktop/admin", json={"action": "lock"})
+        self.assertEqual(locked.status_code, 200)
+
+        locked_settings = client.post(
+            "/api/desktop/settings",
+            json={
+                "selected_lan_ip": "192.168.1.88",
+                "configured_network_base_url": "http://192.168.1.88:8787",
+            },
+        )
+        self.assertEqual(locked_settings.status_code, 403)
+
+        denied = client.post("/api/desktop/admin", json={"action": "unlock", "pin": "9999"})
+        self.assertEqual(denied.status_code, 403)
+
+        unlocked = client.post("/api/desktop/admin", json={"action": "unlock", "pin": "2468"})
+        self.assertEqual(unlocked.status_code, 200)
+        self.assertIn("unlocked", unlocked.get_json()["message"].lower())
+
+        unlocked_settings = client.post(
+            "/api/desktop/settings",
+            json={
+                "selected_lan_ip": "192.168.1.88",
+                "configured_network_base_url": "http://192.168.1.88:8787",
+            },
+        )
+        self.assertEqual(unlocked_settings.status_code, 200)
+
+        health = client.get("/api/desktop/health")
+        self.assertEqual(health.status_code, 200)
+        health_payload = health.get_json()
+        self.assertIn("checks", health_payload)
+        self.assertIn("lan_url", health_payload["checks"])
+        self.assertIn("firewall_rule", health_payload["checks"])
 
 
 if __name__ == "__main__":

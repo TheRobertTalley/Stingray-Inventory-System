@@ -49,7 +49,8 @@ Backups are portable between computers and restore inventory, orders, logs, and 
 - Stop desktop app + disable autostart: `desktop_app/stop_desktop_app.ps1`
 - Uninstall desktop app: `desktop_app/uninstall_desktop_app.ps1`
 - Desktop notes: `desktop_app/README.md`
-- Desktop installer now supports Inventory app naming, Stingray branding/logo, desktop shortcut, system startup task with crash restart, LAN firewall access for TCP `8787`, and a Settings toggle for autorun.
+- Desktop installer now supports Inventory app naming, Stingray branding/logo, desktop shortcut, first-run setup wizard, health dashboard, admin PIN gate, system startup task with crash restart, LAN firewall access for TCP `8787`, and a Settings toggle for autorun.
+- Upgrades cleanly remove old desktop app binaries and legacy shortcuts, while preserving and importing existing inventory data from older `ProgramData` trees.
 - Installer ZIP includes one-click setup (`Install Inventory.cmd`) that prompts for UAC and configures startup correctly.
 
 ## Hardware

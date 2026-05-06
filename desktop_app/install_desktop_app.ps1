@@ -15,9 +15,20 @@ param(
 $ErrorActionPreference = "Stop"
 
 $cloudHeader = "provider|login_email|folder_name|folder_hint|mode|backup_mode|asset_mode|brand_name|brand_logo_ref|client_id|client_secret|updated_at"
-$defaultBrandLogoPath = "C:\\Users\\TALLEY\\Pictures\\stingray logo.png"
 $legacySystemTaskName = "Stingray Inventory Desktop (System Startup)"
 $legacyFirewallRuleName = "Stingray Inventory Desktop LAN"
+$legacyInstallDirs = @(
+  (Join-Path $env:ProgramFiles "StingrayInventoryDesktop"),
+  (Join-Path $env:ProgramFiles "Stingray Inventory Desktop")
+)
+$legacyProgramDataRoots = @(
+  (Join-Path $env:ProgramData "StingrayInventoryDesktop"),
+  (Join-Path $env:ProgramData "Stingray Inventory Desktop")
+)
+$legacyStartMenuDirs = @(
+  (Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\StingrayInventoryDesktop"),
+  (Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Stingray Inventory Desktop")
+)
 
 function Test-IsAdministrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -48,11 +59,73 @@ function Resolve-BrandLogoPath {
     return (Resolve-Path $bundledLogoPath).Path
   }
 
-  if (Test-Path $defaultBrandLogoPath) {
-    return (Resolve-Path $defaultBrandLogoPath).Path
+  return ""
+}
+
+function Copy-MissingTree {
+  param(
+    [string]$SourcePath,
+    [string]$DestinationPath
+  )
+
+  if (-not (Test-Path $SourcePath)) {
+    return $false
   }
 
-  return ""
+  New-Item -ItemType Directory -Force -Path $DestinationPath | Out-Null
+  foreach ($entry in Get-ChildItem -LiteralPath $SourcePath -Force -ErrorAction SilentlyContinue) {
+    $target = Join-Path $DestinationPath $entry.Name
+    if ($entry.PSIsContainer) {
+      [void](Copy-MissingTree -SourcePath $entry.FullName -DestinationPath $target)
+    } elseif (-not (Test-Path $target)) {
+      Copy-Item -LiteralPath $entry.FullName -Destination $target -Force
+    }
+  }
+
+  return $true
+}
+
+function Import-LegacyProgramData {
+  param(
+    [string[]]$LegacyRoots,
+    [string]$InventoryRoot
+  )
+
+  $imported = $false
+  foreach ($legacyRoot in $LegacyRoots) {
+    if (-not (Test-Path $legacyRoot)) {
+      continue
+    }
+
+    $imported = $true
+    foreach ($relativeChild in @("data", "backups", "logs", "config")) {
+      $legacyChild = Join-Path $legacyRoot $relativeChild
+      $newChild = Join-Path $InventoryRoot $relativeChild
+      [void](Copy-MissingTree -SourcePath $legacyChild -DestinationPath $newChild)
+    }
+  }
+
+  return $imported
+}
+
+function Remove-DirectoryTree {
+  param(
+    [string]$Path
+  )
+
+  if (-not (Test-Path $Path)) {
+    return
+  }
+
+  try {
+    Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  } catch {
+  }
+
+  try {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  } catch {
+  }
 }
 
 function Convert-PngToIco {
@@ -186,9 +259,19 @@ New-Item -ItemType Directory -Force -Path (Join-Path $env:ProgramData "Inventory
 New-Item -ItemType Directory -Force -Path (Join-Path $env:ProgramData "Inventory\\config") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "images") | Out-Null
 
-$legacyDataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data"
-if ((-not (Test-Path (Join-Path $DataDir "inventory.csv"))) -and (Test-Path $legacyDataDir)) {
-  Copy-Item -Path (Join-Path $legacyDataDir "*") -Destination $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+$inventoryRoot = Split-Path -Parent $DataDir
+[void](Import-LegacyProgramData -LegacyRoots $legacyProgramDataRoots -InventoryRoot $inventoryRoot)
+
+foreach ($legacyInstallDir in $legacyInstallDirs) {
+  if ($legacyInstallDir -and (Test-Path $legacyInstallDir)) {
+    Remove-DirectoryTree -Path $legacyInstallDir
+  }
+}
+
+foreach ($legacyStartMenuDir in $legacyStartMenuDirs) {
+  if ($legacyStartMenuDir -and (Test-Path $legacyStartMenuDir)) {
+    Remove-DirectoryTree -Path $legacyStartMenuDir
+  }
 }
 
 Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -356,7 +439,7 @@ if ($NoAutoStart) {
     }
   }
 } else {
-  & icacls $DataDir /grant "SYSTEM:(OI)(CI)(M)" "Users:(OI)(CI)(M)" /T /C | Out-Null
+  & icacls $inventoryRoot /grant "SYSTEM:(OI)(CI)(M)" "Users:(OI)(CI)(M)" /T /C | Out-Null
 
   $taskActionArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$supervisorPath`""
   $taskAction = New-ScheduledTaskAction -Execute $powershellExe -Argument $taskActionArgs -WorkingDirectory $InstallDir

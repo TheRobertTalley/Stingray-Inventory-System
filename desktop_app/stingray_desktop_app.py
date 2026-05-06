@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import ipaddress
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -12,17 +15,19 @@ import sys
 import threading
 import time
 import uuid
+import secrets
 import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 import zipfile
 
 import qrcode
 import qrcode.image.svg
-from flask import Flask, Response, jsonify, request, send_file
+from flask import Flask, Response, has_request_context, jsonify, request, send_file, session
 
 
 INVENTORY_HEADER = "part_number|category|part_name|qr_code|color|material|qty|image_ref|bom_product|bom_qty|updated_at"
@@ -116,6 +121,10 @@ class DesktopConfig:
     port: int = 8787
     selected_lan_ip: str = ""
     configured_network_base_url: str = ""
+    setup_complete: bool = False
+    admin_pin_salt: str = ""
+    admin_pin_hash: str = ""
+    session_secret: str = ""
     updated_at: str = ""
 
 
@@ -256,6 +265,50 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(text).is_loopback
     except ValueError:
         return False
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = trim_copy(str(value)).lower()
+    if not text:
+        return default
+    return text in {"1", "true", "yes", "on", "enabled"}
+
+
+def hash_admin_pin(pin: str, salt_b64: str = "") -> tuple[str, str]:
+    pin_text = trim_copy(pin)
+    if len(pin_text) < 4:
+        raise ValueError("Admin PIN must be at least 4 characters.")
+    salt = base64.b64decode(salt_b64) if salt_b64 else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin_text.encode("utf-8"), salt, 120_000)
+    return base64.b64encode(salt).decode("ascii"), base64.b64encode(digest).decode("ascii")
+
+
+def verify_admin_pin(pin: str, salt_b64: str, expected_hash_b64: str) -> bool:
+    if not salt_b64 or not expected_hash_b64:
+        return False
+    try:
+        salt, digest = hash_admin_pin(pin, salt_b64)
+    except ValueError:
+        return False
+    return hmac.compare_digest(digest, expected_hash_b64)
+
+
+def probe_url(url: str, timeout: float = 2.0) -> tuple[bool, str]:
+    target = trim_copy(url)
+    if not target:
+        return False, "Missing URL."
+    try:
+        request = Request(target, headers={"User-Agent": "InventoryDesktop/1.0"})
+        with urlopen(request, timeout=timeout) as response:
+            return 200 <= int(getattr(response, "status", response.getcode() or 0)) < 500, "Reachable"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def normalize_base_url(value: str) -> str:
@@ -534,6 +587,7 @@ class DesktopStore:
         self.google_state_tmp_file = self.config_dir / "google_drive_state.tmp"
         self.app_config_file = self.config_dir / APP_CONFIG_FILE
         self.app_config_tmp_file = self.config_dir / "desktop_config.tmp"
+        self.app_config_existed = self.app_config_file.exists()
         self.lock = threading.RLock()
         self.start_monotonic = time.monotonic()
         self.mac_address = self._mac_address_string()
@@ -636,6 +690,8 @@ class DesktopStore:
 
     def _load_app_config(self, bind_host: str, port: int) -> None:
         cfg = DesktopConfig(bind_host=bind_host or "0.0.0.0", port=port or 8787)
+        if not self.app_config_existed:
+            cfg.setup_complete = False
         if self.app_config_file.exists():
             try:
                 data = json.loads(self.app_config_file.read_text(encoding="utf-8"))
@@ -643,6 +699,10 @@ class DesktopStore:
                 cfg.port = int(data.get("port", cfg.port) or cfg.port)
                 cfg.selected_lan_ip = trim_copy(str(data.get("selected_lan_ip", "")))
                 cfg.configured_network_base_url = normalize_base_url(str(data.get("configured_network_base_url", "")))
+                cfg.setup_complete = parse_bool(data.get("setup_complete", True if self.app_config_existed else False), default=True if self.app_config_existed else False)
+                cfg.admin_pin_salt = trim_copy(str(data.get("admin_pin_salt", "")))
+                cfg.admin_pin_hash = trim_copy(str(data.get("admin_pin_hash", "")))
+                cfg.session_secret = trim_copy(str(data.get("session_secret", "")))
                 cfg.updated_at = trim_copy(str(data.get("updated_at", "")))
             except (ValueError, json.JSONDecodeError):
                 pass
@@ -652,6 +712,8 @@ class DesktopStore:
             cfg.selected_lan_ip = default_lan_ip()
         if not cfg.configured_network_base_url:
             cfg.configured_network_base_url = f"http://{cfg.selected_lan_ip}:{cfg.port}"
+        if not cfg.session_secret:
+            cfg.session_secret = secrets.token_urlsafe(32)
         self.app_config = cfg
         self._save_app_config()
 
@@ -660,11 +722,88 @@ class DesktopStore:
         self.app_config_tmp_file.write_text(json.dumps(asdict(self.app_config), indent=2) + "\n", encoding="utf-8")
         self.app_config_tmp_file.replace(self.app_config_file)
 
+    def save_admin_pin(self, pin: str) -> None:
+        salt, digest = hash_admin_pin(pin)
+        with self.lock:
+            self.app_config.admin_pin_salt = salt
+            self.app_config.admin_pin_hash = digest
+            self.app_config.setup_complete = True
+            self._save_app_config()
+
+    def clear_admin_unlock(self) -> None:
+        if has_request_context():
+            session.pop("desktop_admin_unlocked", None)
+            session.pop("desktop_admin_unlocked_at", None)
+
+    def set_admin_unlock(self, unlocked: bool) -> None:
+        if not has_request_context():
+            return
+        if unlocked:
+            session["desktop_admin_unlocked"] = True
+            session["desktop_admin_unlocked_at"] = current_timestamp()
+        else:
+            self.clear_admin_unlock()
+
+    def admin_pin_is_configured(self) -> bool:
+        return bool(self.app_config.admin_pin_salt and self.app_config.admin_pin_hash)
+
+    def admin_unlocked(self) -> bool:
+        if not has_request_context():
+            return False
+        return bool(session.get("desktop_admin_unlocked"))
+
+    def verify_admin_pin(self, pin: str) -> bool:
+        return verify_admin_pin(pin, self.app_config.admin_pin_salt, self.app_config.admin_pin_hash)
+
+    def admin_access_state(self) -> dict[str, Any]:
+        return {
+            "setup_required": not self.app_config.setup_complete,
+            "setup_complete": bool(self.app_config.setup_complete),
+            "admin_pin_configured": self.admin_pin_is_configured(),
+            "admin_unlocked": self.admin_unlocked(),
+        }
+
     def configured_base_url(self) -> str:
         base = normalize_base_url(self.app_config.configured_network_base_url)
         if base:
             return base
         return f"http://{self.app_config.selected_lan_ip or default_lan_ip()}:{self.app_config.port}"
+
+    def local_pc_url(self) -> str:
+        return f"http://127.0.0.1:{self.app_config.port}"
+
+    def setup_page_url(self) -> str:
+        return f"{self.configured_base_url()}/setup"
+
+    def settings_page_url(self) -> str:
+        return f"{self.configured_base_url()}/settings"
+
+    def health_json(self, base_url: str) -> dict[str, Any]:
+        lan_url = self.configured_base_url()
+        local_url = self.local_pc_url()
+        probe_local, local_detail = probe_url(f"{local_url}/api/status")
+        probe_lan, lan_detail = probe_url(f"{lan_url}/api/status")
+        firewall = firewall_rule_status(self.app_config.port)
+        task = scheduled_task_status()
+        setup = self.admin_access_state()
+        overall_ok = bool(probe_local and probe_lan and firewall.get("installed") and setup["setup_complete"])
+        overall = "green" if overall_ok else "red"
+        return {
+            "overall": overall,
+            "overall_ok": overall_ok,
+            "local_pc_url": local_url,
+            "network_url": lan_url,
+            "can_copy_lan_url": bool(lan_url),
+            "checks": {
+                "local_pc_url": {"ok": probe_local, "detail": local_detail},
+                "lan_url": {"ok": probe_lan, "detail": lan_detail},
+                "firewall_rule": firewall,
+                "scheduled_task": task,
+                "setup_complete": setup["setup_complete"],
+                "admin_pin_configured": setup["admin_pin_configured"],
+                "admin_unlocked": setup["admin_unlocked"],
+            },
+        }
 
     def _load_inventory(self) -> None:
         with self.lock:
@@ -1316,6 +1455,7 @@ class DesktopStore:
         host = urlparse(configured_base_url).hostname or ""
         firewall = firewall_rule_status(self.app_config.port)
         task = scheduled_task_status()
+        setup = self.admin_access_state()
         payload = {
             "app_name": APP_DISPLAY_NAME,
             "legacy_app_name": LEGACY_APP_DISPLAY_NAME,
@@ -1325,7 +1465,7 @@ class DesktopStore:
             "hostname": socket.gethostname(),
             "base_url": configured_base_url,
             "configured_network_base_url": configured_base_url,
-            "local_pc_url": f"http://127.0.0.1:{self.app_config.port}",
+            "local_pc_url": self.local_pc_url(),
             "network_url": configured_base_url,
             "bind_address": self.app_config.bind_host,
             "port": self.app_config.port,
@@ -1340,6 +1480,11 @@ class DesktopStore:
             "auto_run_task_name": task.get("name", SYSTEM_TASK_NAME),
             "run_mode": "Scheduled Task" if task.get("exists") else "Manual",
             "supervisor_active": task.get("running", False),
+            "setup_complete": setup["setup_complete"],
+            "setup_required": setup["setup_required"],
+            "admin_pin_configured": setup["admin_pin_configured"],
+            "admin_unlocked": setup["admin_unlocked"],
+            "admin_shell_locked": setup["admin_pin_configured"] and not setup["admin_unlocked"],
             "qr_loopback_warning": is_loopback_host(host),
             "data_dir": str(self.data_dir),
             "backups_dir": str(self.backups_dir),
@@ -1412,6 +1557,8 @@ class DesktopStore:
 def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.0.0", port: int = 8787) -> tuple[Flask, DesktopStore]:
     app = Flask(__name__)
     store = DesktopStore(data_dir=data_dir, firmware_ino=firmware_ino, bind_host=bind_host, port=port)
+    app.secret_key = store.app_config.session_secret or secrets.token_urlsafe(32)
+    app.config["SESSION_COOKIE_NAME"] = "inventory_desktop_session"
 
     def base_url() -> str:
         return store.configured_base_url()
@@ -1426,77 +1573,241 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     def json_error(status: int, message: str):
         return jsonify({"error": message}), status
 
-    def desktop_settings_html() -> str:
+    def require_admin_access() -> tuple[bool, Any | None]:
+        if not store.admin_pin_is_configured():
+            return True, None
+        if store.admin_unlocked():
+            return True, None
+        return False, json_error(403, "Admin PIN required.")
+
+    def read_pin_from_request(*names: str) -> str:
+        for name in names:
+            value = trim_copy(arg(name))
+            if value:
+                return value
+        return ""
+
+    def set_app_config_and_session_secret_if_needed() -> None:
+        if not store.app_config.session_secret:
+            store.app_config.session_secret = secrets.token_urlsafe(32)
+            store._save_app_config()
+        app.secret_key = store.app_config.session_secret
+
+    def desktop_settings_html(setup_mode: bool = False) -> str:
         html = store.index_html
-        panel = r'''
-      <h2>Desktop LAN Access</h2>
-      <p class="caption">Use this URL from phones and tablets on the same Wi-Fi/LAN. QR codes use this LAN URL.</p>
-      <div class="form-grid">
-        <label>
-          Local PC URL
-          <input id="desktop-local-url" type="text" readonly>
-        </label>
-        <label>
-          LAN access URL
-          <input id="desktop-network-url" type="text" readonly>
-        </label>
-        <label>
-          Selected host IP
-          <select id="desktop-lan-ip"></select>
-        </label>
-        <label>
-          QR/base URL
-          <input id="desktop-base-url" type="text" placeholder="http://192.168.1.50:8787">
-        </label>
-      </div>
-      <div class="cloud-actions">
-        <button id="desktop-save-network-btn" type="button">Save LAN URL</button>
-        <button id="desktop-copy-lan-btn" type="button" class="secondary">Copy LAN URL</button>
-        <button id="desktop-network-test-btn" type="button" class="secondary">Network Test</button>
-      </div>
-      <pre id="desktop-network-status" class="cloud-status">Loading desktop network status...</pre>
+        wizard_visible = setup_mode or not store.app_config.setup_complete
+        wizard_hidden = "" if wizard_visible else " hidden"
+        admin_locked = not store.admin_unlocked()
+        admin_shell_hidden = "" if not admin_locked else " hidden"
+        panel = f'''
+<style>
+  #desktop-health-panel .desktop-health-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+    margin: 0.75rem 0 1rem;
+  }}
+  #desktop-health-panel .desktop-health-card {{
+    border: 1px solid rgba(128, 128, 128, 0.35);
+    border-radius: 14px;
+    padding: 0.8rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+  }}
+  #desktop-health-panel .desktop-health-card.ok {{
+    border-color: rgba(50, 140, 60, 0.8);
+    background: rgba(50, 140, 60, 0.12);
+  }}
+  #desktop-health-panel .desktop-health-card.bad {{
+    border-color: rgba(180, 40, 40, 0.8);
+    background: rgba(180, 40, 40, 0.12);
+  }}
+  #desktop-health-panel .desktop-health-state {{
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin: 0.25rem 0;
+  }}
+  #desktop-health-panel .desktop-health-detail {{
+    font-size: 0.9rem;
+    opacity: 0.85;
+  }}
+  .desktop-wizard {{
+    border: 1px solid rgba(120, 120, 120, 0.28);
+    border-radius: 18px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    background: linear-gradient(135deg, rgba(32, 59, 30, 0.18), rgba(18, 27, 33, 0.04));
+  }}
+  .desktop-wizard[hidden],
+  .desktop-admin-shell[hidden] {{
+    display: none !important;
+  }}
+  .desktop-callout {{
+    border-left: 4px solid rgba(80, 160, 90, 0.9);
+    padding-left: 0.75rem;
+    margin: 0.5rem 0 1rem;
+  }}
+</style>
+      <section class="info-panel desktop-wizard" id="desktop-setup-wizard"{wizard_hidden}>
+        <h2>First-Run Setup</h2>
+        <p class="caption">Create a LAN URL and an admin PIN before you start using advanced desktop settings.</p>
+        <div class="form-grid">
+          <label>
+            Local PC URL
+            <input id="desktop-setup-local-url" type="text" readonly>
+          </label>
+          <label>
+            LAN access URL
+            <input id="desktop-setup-network-url" type="text" readonly>
+          </label>
+          <label>
+            Selected host IP
+            <select id="desktop-setup-lan-ip"></select>
+          </label>
+          <label>
+            QR/base URL
+            <input id="desktop-setup-base-url" type="text" placeholder="http://192.168.1.50:8787">
+          </label>
+          <label>
+            Admin PIN
+            <input id="desktop-setup-pin" type="password" placeholder="Create a 4+ character PIN">
+          </label>
+          <label>
+            Confirm PIN
+            <input id="desktop-setup-pin-confirm" type="password" placeholder="Repeat the PIN">
+          </label>
+        </div>
+        <div class="cloud-actions">
+          <button id="desktop-setup-save-btn" type="button">Finish Setup</button>
+          <button id="desktop-setup-health-btn" type="button" class="secondary">Check LAN Reachability</button>
+        </div>
+        <div class="desktop-callout">After setup, the app will open the reachable LAN URL automatically.</div>
+        <pre id="desktop-setup-status" class="cloud-status">Setup not complete.</pre>
+      </section>
 
-      <h2>Desktop Auto Run</h2>
-      <div class="form-grid">
-        <label class="span-2">
-          <input id="desktop-auto-toggle" type="checkbox">
-          Auto run and crash restart
-        </label>
-      </div>
-      <div class="cloud-actions">
-        <button id="desktop-apply-auto-btn" type="button">Apply Auto Run</button>
-        <button id="desktop-restart-btn" type="button" class="secondary">Restart App</button>
-        <button id="desktop-stop-btn" type="button" class="secondary">Stop App</button>
-        <button id="desktop-stop-disable-btn" type="button" class="secondary">Stop App And Disable Auto Run</button>
-      </div>
-      <pre id="desktop-run-status" class="cloud-status">Loading auto run status...</pre>
+      <section class="info-panel" id="desktop-health-panel">
+        <h2>Health Dashboard</h2>
+        <p class="caption">Green means the desktop service is ready for phones, tablets, and reboot recovery.</p>
+        <div class="desktop-health-grid">
+          <div class="desktop-health-card" id="desktop-health-overall-card">
+            <div class="small">Overall</div>
+            <div class="desktop-health-state" id="desktop-health-overall-state">Loading...</div>
+            <div class="desktop-health-detail" id="desktop-health-overall-detail">Waiting for status.</div>
+          </div>
+          <div class="desktop-health-card" id="desktop-health-lan-card">
+            <div class="small">LAN URL</div>
+            <div class="desktop-health-state" id="desktop-health-lan-state">Loading...</div>
+            <div class="desktop-health-detail" id="desktop-health-lan-detail">Waiting for status.</div>
+          </div>
+          <div class="desktop-health-card" id="desktop-health-firewall-card">
+            <div class="small">Firewall / Startup</div>
+            <div class="desktop-health-state" id="desktop-health-firewall-state">Loading...</div>
+            <div class="desktop-health-detail" id="desktop-health-firewall-detail">Waiting for status.</div>
+          </div>
+        </div>
+        <div class="cloud-actions">
+          <button id="desktop-copy-lan-btn" type="button">Copy LAN URL</button>
+          <button id="desktop-health-test-btn" type="button" class="secondary">Test This PC</button>
+        </div>
+        <pre id="desktop-health-status" class="cloud-status">Loading desktop health...</pre>
+      </section>
 
-      <h2>Import ESP32 SD Data</h2>
-      <div class="form-grid">
-        <label class="span-2">
-          SD card or copied SD folder
-          <input id="desktop-sd-path" type="text" placeholder="D:\ or C:\Path\To\SDCopy">
-        </label>
-        <label>
-          Import mode
-          <select id="desktop-sd-mode">
-            <option value="merge">Merge into current inventory</option>
-            <option value="backup_replace">Backup current data then replace</option>
-            <option value="replace">Replace current inventory</option>
-          </select>
-        </label>
-      </div>
-      <div class="cloud-actions">
-        <button id="desktop-backup-btn" type="button">Backup Current Data</button>
-        <input id="desktop-backup-file" type="file" accept=".zip">
-        <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
-        <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview SD Import</button>
-        <button id="desktop-import-sd-btn" type="button" class="secondary">Import SD Data</button>
-      </div>
-      <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
+      <section class="info-panel" id="desktop-lan-panel">
+        <h2>Desktop LAN Access</h2>
+        <p class="caption">Use this URL from phones and tablets on the same Wi-Fi/LAN. QR codes use this LAN URL.</p>
+        <div class="form-grid">
+          <label>
+            Local PC URL
+            <input id="desktop-local-url" type="text" readonly>
+          </label>
+          <label>
+            LAN access URL
+            <input id="desktop-network-url" type="text" readonly>
+          </label>
+          <label>
+            Selected host IP
+            <select id="desktop-lan-ip"></select>
+          </label>
+          <label>
+            QR/base URL
+            <input id="desktop-base-url" type="text" placeholder="http://192.168.1.50:8787">
+          </label>
+        </div>
+        <div class="cloud-actions">
+          <button id="desktop-save-network-btn" type="button">Save LAN URL</button>
+          <button id="desktop-network-test-btn" type="button" class="secondary">Test LAN URL</button>
+        </div>
+        <pre id="desktop-network-status" class="cloud-status">Loading desktop network status...</pre>
+      </section>
+
+      <section class="info-panel" id="desktop-admin-access-panel">
+        <h2>Admin Access</h2>
+        <p class="caption">Unlock advanced settings with a PIN. If no PIN exists yet, create one here or in first-run setup.</p>
+        <div class="form-grid">
+          <label>
+            Current PIN
+            <input id="desktop-admin-pin" type="password" placeholder="Enter PIN">
+          </label>
+          <label>
+            New PIN
+            <input id="desktop-admin-new-pin" type="password" placeholder="Optional: change PIN">
+          </label>
+          <label>
+            Confirm new PIN
+            <input id="desktop-admin-new-pin-confirm" type="password" placeholder="Repeat new PIN">
+          </label>
+        </div>
+        <div class="cloud-actions">
+          <button id="desktop-admin-action-btn" type="button">Unlock Admin Settings</button>
+          <button id="desktop-admin-lock-btn" type="button" class="secondary">Lock Admin Settings</button>
+        </div>
+        <pre id="desktop-admin-status" class="cloud-status">Admin settings are locked.</pre>
+      </section>
+
+      <section class="info-panel desktop-admin-shell" id="desktop-admin-shell"{admin_shell_hidden}>
+        <h2>Desktop Auto Run</h2>
+        <div class="form-grid">
+          <label class="span-2">
+            <input id="desktop-auto-toggle" type="checkbox">
+            Auto run and crash restart
+          </label>
+        </div>
+        <div class="cloud-actions">
+          <button id="desktop-apply-auto-btn" type="button">Apply Auto Run</button>
+          <button id="desktop-restart-btn" type="button" class="secondary">Restart App</button>
+          <button id="desktop-stop-btn" type="button" class="secondary">Stop App</button>
+          <button id="desktop-stop-disable-btn" type="button" class="secondary">Stop App And Disable Auto Run</button>
+        </div>
+        <pre id="desktop-run-status" class="cloud-status">Loading auto run status...</pre>
+
+        <h2>Import ESP32 SD Data</h2>
+        <div class="form-grid">
+          <label class="span-2">
+            SD card or copied SD folder
+            <input id="desktop-sd-path" type="text" placeholder="D:\ or C:\Path\To\SDCopy">
+          </label>
+          <label>
+            Import mode
+            <select id="desktop-sd-mode">
+              <option value="merge">Merge into current inventory</option>
+              <option value="backup_replace">Backup current data then replace</option>
+              <option value="replace">Replace current inventory</option>
+            </select>
+          </label>
+        </div>
+        <div class="cloud-actions">
+          <button id="desktop-backup-btn" type="button">Backup Current Data</button>
+          <input id="desktop-backup-file" type="file" accept=".zip">
+          <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
+          <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview SD Import</button>
+          <button id="desktop-import-sd-btn" type="button" class="secondary">Import SD Data</button>
+        </div>
+        <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
+      </section>
 '''
+        html = html.replace('      <h2>Storage And Branding</h2>', '      <div id="desktop-cloud-admin-shell" class="desktop-admin-shell" hidden>\n      <h2>Storage And Branding</h2>')
+        html = html.replace('      <h2>Activity Log</h2>', '      </div>\n      <h2>Activity Log</h2>')
         marker = '      <div class="cloud-actions">\n        <button id="save-cloud-btn" type="button">Save Storage And Branding Settings</button>'
-        if marker in html and "desktop-lan-ip" not in html:
+        if marker in html and "desktop-health-panel" not in html:
             html = html.replace(marker, panel + "\n" + marker)
         script = r'''
 <script>
@@ -1510,6 +1821,19 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
   }
   async function post(url, body) {
     return json(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+  }
+  function setHidden(id, hidden) {
+    const node = $(id);
+    if (!node) return;
+    node.hidden = hidden;
+  }
+  function setCardState(cardId, stateId, detailId, ok, stateText, detailText) {
+    const card = $(cardId);
+    const state = $(stateId);
+    const detail = $(detailId);
+    if (card) card.className = `desktop-health-card ${ok ? 'ok' : 'bad'}`;
+    if (state) state.textContent = stateText || '';
+    if (detail) detail.textContent = detailText || '';
   }
   function networkLines(s) {
     return [
@@ -1525,30 +1849,114 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       'Router checks: same Wi-Fi, guest isolation off, AP/client isolation off.'
     ].filter(Boolean).join('\n');
   }
-  async function loadDesktopStatus() {
-    if (!$('desktop-lan-ip')) return;
+  function applyHealth(h) {
+    if ($('desktop-health-status')) {
+      $('desktop-health-status').textContent = JSON.stringify(h || {}, null, 2);
+    }
+    const health = h || {};
+    const overallOk = Boolean(health.overall_ok);
+    const lanOk = Boolean((health.checks || {}).lan_url && (health.checks || {}).lan_url.ok);
+    const firewallOk = Boolean((health.checks || {}).firewall_rule && (health.checks || {}).firewall_rule.installed);
+    const taskOk = Boolean((health.checks || {}).scheduled_task && (health.checks || {}).scheduled_task.exists);
+    setCardState('desktop-health-overall-card', 'desktop-health-overall-state', 'desktop-health-overall-detail', overallOk, overallOk ? 'Green' : 'Red', overallOk ? 'LAN and startup are ready.' : 'One or more checks need attention.');
+    setCardState('desktop-health-lan-card', 'desktop-health-lan-state', 'desktop-health-lan-detail', lanOk, lanOk ? 'Green' : 'Red', lanOk ? 'LAN URL is reachable from this PC.' : 'LAN URL is not reachable yet.');
+    setCardState('desktop-health-firewall-card', 'desktop-health-firewall-state', 'desktop-health-firewall-detail', firewallOk && taskOk, (firewallOk && taskOk) ? 'Green' : 'Red', [firewallOk ? 'Firewall ok' : 'Firewall missing', taskOk ? 'startup task ok' : 'startup task missing'].join(' / '));
+  }
+  function applyStatus(s) {
+    if ($('desktop-local-url')) $('desktop-local-url').value = s.local_pc_url || '';
+    if ($('desktop-network-url')) $('desktop-network-url').value = s.network_url || '';
+    if ($('desktop-base-url')) $('desktop-base-url').value = s.configured_network_base_url || '';
+    if ($('desktop-lan-ip')) {
+      $('desktop-lan-ip').innerHTML = (s.detected_lan_ips || []).map((ip) => `<option value="${ip}" ${ip === s.selected_lan_ip ? 'selected' : ''}>${ip}</option>`).join('');
+    }
+    if ($('desktop-auto-toggle')) $('desktop-auto-toggle').checked = Boolean(s.auto_run_enabled);
+    if ($('desktop-network-status')) $('desktop-network-status').textContent = networkLines(s);
+    if ($('desktop-run-status')) {
+      $('desktop-run-status').textContent = [
+        `Auto run: ${s.auto_run_enabled ? 'Enabled' : 'Disabled'}`,
+        `Run mode: ${s.run_mode}`,
+        `Supervisor active: ${s.supervisor_active ? 'yes' : 'no'}`
+      ].join('\n');
+    }
+    const setupRequired = Boolean(s.setup_required);
+    const adminUnlocked = Boolean(s.admin_unlocked);
+    const pinConfigured = Boolean(s.admin_pin_configured);
+    setHidden('desktop-setup-wizard', !setupRequired && !window.location.pathname.endsWith('/setup'));
+    if ($('desktop-admin-action-btn')) {
+      $('desktop-admin-action-btn').textContent = pinConfigured ? 'Unlock Admin Settings' : 'Create Admin PIN';
+    }
+    if ($('desktop-admin-status')) {
+      $('desktop-admin-status').textContent = pinConfigured
+        ? (adminUnlocked ? 'Admin settings unlocked.' : 'Admin settings are locked.')
+        : 'No admin PIN exists yet. Create one to lock advanced settings.';
+    }
+    setHidden('desktop-admin-shell', !adminUnlocked);
+    if ($('desktop-lan-ip')) $('desktop-lan-ip').disabled = !adminUnlocked;
+    if ($('desktop-base-url')) $('desktop-base-url').readOnly = !adminUnlocked;
+    if ($('desktop-save-network-btn')) $('desktop-save-network-btn').hidden = !adminUnlocked;
+    setHidden('desktop-cloud-admin-shell', !adminUnlocked);
+  }
+  async function refreshStatus() {
     const s = await json('/api/status');
-    $('desktop-local-url').value = s.local_pc_url || '';
-    $('desktop-network-url').value = s.network_url || '';
-    $('desktop-base-url').value = s.configured_network_base_url || '';
-    $('desktop-lan-ip').innerHTML = (s.detected_lan_ips || []).map((ip) => `<option value="${ip}" ${ip === s.selected_lan_ip ? 'selected' : ''}>${ip}</option>`).join('');
-    $('desktop-auto-toggle').checked = Boolean(s.auto_run_enabled);
-    $('desktop-network-status').textContent = networkLines(s);
-    $('desktop-run-status').textContent = [
-      `Auto run: ${s.auto_run_enabled ? 'Enabled' : 'Disabled'}`,
-      `Run mode: ${s.run_mode}`,
-      `Supervisor active: ${s.supervisor_active ? 'yes' : 'no'}`
-    ].join('\n');
+    applyStatus(s);
+    return s;
+  }
+  async function refreshHealth() {
+    const s = await json('/api/desktop/health');
+    applyHealth(s);
+    return s;
+  }
+  async function loadDesktopStatus() {
+    if (!$('desktop-health-panel')) return;
+    await refreshStatus();
+    await refreshHealth();
   }
   async function saveNetwork() {
     await post('/api/desktop/settings', {selected_lan_ip: $('desktop-lan-ip').value, configured_network_base_url: $('desktop-base-url').value});
-    await loadDesktopStatus();
+    await refreshStatus();
+  }
+  async function copyLanUrl() {
+    const s = await refreshStatus();
+    const value = s.network_url || $('desktop-network-url').value || '';
+    if (navigator.clipboard && value) {
+      await navigator.clipboard.writeText(value);
+    }
+  }
+  async function adminAction() {
+    const pin = $('desktop-admin-pin') ? $('desktop-admin-pin').value.trim() : '';
+    const newPin = $('desktop-admin-new-pin') ? $('desktop-admin-new-pin').value.trim() : '';
+    const confirmPin = $('desktop-admin-new-pin-confirm') ? $('desktop-admin-new-pin-confirm').value.trim() : '';
+    const action = newPin ? 'set_pin' : 'unlock';
+    const payload = {action, pin, new_pin: newPin, confirm_pin: confirmPin};
+    const result = await post('/api/desktop/admin', payload);
+    if ($('desktop-admin-status')) $('desktop-admin-status').textContent = result.message || JSON.stringify(result, null, 2);
+    if ($('desktop-admin-pin')) $('desktop-admin-pin').value = '';
+    if ($('desktop-admin-new-pin')) $('desktop-admin-new-pin').value = '';
+    if ($('desktop-admin-new-pin-confirm')) $('desktop-admin-new-pin-confirm').value = '';
+    await refreshStatus();
+  }
+  async function lockAdmin() {
+    const result = await post('/api/desktop/admin', {action: 'lock'});
+    if ($('desktop-admin-status')) $('desktop-admin-status').textContent = result.message || 'Admin settings locked.';
+    await refreshStatus();
+  }
+  async function finishSetup() {
+    const result = await post('/api/desktop/setup', {
+      selected_lan_ip: $('desktop-setup-lan-ip').value,
+      configured_network_base_url: $('desktop-setup-base-url').value,
+      admin_pin: $('desktop-setup-pin').value,
+      admin_pin_confirm: $('desktop-setup-pin-confirm').value
+    });
+    if ($('desktop-setup-status')) $('desktop-setup-status').textContent = result.message || JSON.stringify(result, null, 2);
+    $('desktop-setup-pin').value = '';
+    $('desktop-setup-pin-confirm').value = '';
+    await refreshStatus();
   }
   async function system(action) {
     try {
       const result = await post('/api/desktop/system', {action});
       $('desktop-run-status').textContent = result.message || JSON.stringify(result, null, 2);
-      if (!action.includes('stop')) setTimeout(loadDesktopStatus, 600);
+      if (!action.includes('stop')) setTimeout(refreshStatus, 600);
     } catch (error) {
       $('desktop-run-status').textContent = error.message;
     }
@@ -1557,10 +1965,10 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     try {
       const result = await post('/api/desktop/system', {action: 'set_auto', enabled: $('desktop-auto-toggle').checked});
       $('desktop-run-status').textContent = result.message || JSON.stringify(result, null, 2);
-      setTimeout(loadDesktopStatus, 600);
+      setTimeout(refreshStatus, 600);
     } catch (error) {
       $('desktop-run-status').textContent = error.message;
-      setTimeout(loadDesktopStatus, 600);
+      setTimeout(refreshStatus, 600);
     }
   }
   async function previewSd() {
@@ -1588,10 +1996,15 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     $('desktop-import-status').textContent = JSON.stringify(data, null, 2);
   }
   document.addEventListener('DOMContentLoaded', () => {
-    if (!$('desktop-lan-ip')) return;
+    if (!$('desktop-health-panel')) return;
     $('desktop-save-network-btn').addEventListener('click', saveNetwork);
-    $('desktop-copy-lan-btn').addEventListener('click', () => navigator.clipboard && navigator.clipboard.writeText($('desktop-network-url').value));
+    $('desktop-copy-lan-btn').addEventListener('click', () => copyLanUrl().catch((error) => $('desktop-health-status').textContent = error.message));
+    $('desktop-health-test-btn').addEventListener('click', async () => $('desktop-health-status').textContent = JSON.stringify(await refreshHealth(), null, 2));
     $('desktop-network-test-btn').addEventListener('click', async () => $('desktop-network-status').textContent = JSON.stringify(await json('/api/desktop/network-test'), null, 2));
+    $('desktop-admin-action-btn').addEventListener('click', () => adminAction().catch((error) => $('desktop-admin-status').textContent = error.message));
+    $('desktop-admin-lock-btn').addEventListener('click', () => lockAdmin().catch((error) => $('desktop-admin-status').textContent = error.message));
+    $('desktop-setup-save-btn').addEventListener('click', () => finishSetup().catch((error) => $('desktop-setup-status').textContent = error.message));
+    $('desktop-setup-health-btn').addEventListener('click', async () => $('desktop-setup-status').textContent = JSON.stringify(await refreshHealth(), null, 2));
     $('desktop-apply-auto-btn').addEventListener('click', applyAutoRun);
     $('desktop-auto-toggle').addEventListener('change', applyAutoRun);
     $('desktop-restart-btn').addEventListener('click', () => system('restart'));
@@ -1601,12 +2014,13 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     $('desktop-import-sd-btn').addEventListener('click', importSd);
     $('desktop-backup-btn').addEventListener('click', backup);
     $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => $('desktop-import-status').textContent = e.message));
-    loadDesktopStatus();
+    refreshStatus();
   });
 })();
 </script>
 '''
-        return html.replace("</body>", script + "\n</body>") if "loadDesktopStatus" not in html else html
+        html = html.replace("</body>", script + "\n</body>")
+        return html
 
     def desktop_item_html() -> str:
         html = store.item_html
@@ -1754,12 +2168,15 @@ document.getElementById('category').addEventListener('change',load);document.get
 
     @app.route("/", methods=["GET"])
     @app.route("/settings", methods=["GET"])
+    @app.route("/setup", methods=["GET"])
     @app.route("/orders", methods=["GET"])
     @app.route("/orders/view", methods=["GET"])
     @app.route("/orders/fulfill", methods=["GET"])
     def handle_index_page():
+        if request.path == "/setup":
+            return Response(desktop_settings_html(setup_mode=True), mimetype="text/html; charset=utf-8")
         if request.path == "/settings":
-            return Response(desktop_settings_html(), mimetype="text/html; charset=utf-8")
+            return Response(desktop_settings_html(setup_mode=not store.app_config.setup_complete), mimetype="text/html; charset=utf-8")
         if request.path == "/":
             return Response(desktop_inventory_html(), mimetype="text/html; charset=utf-8")
         return Response(store.index_html, mimetype="text/html; charset=utf-8")
@@ -1793,8 +2210,14 @@ document.getElementById('category').addEventListener('change',load);document.get
     def handle_status():
         return jsonify(store.status_json(base_url()))
 
+    @app.route("/api/desktop/health", methods=["GET"])
+    def handle_desktop_health():
+        return jsonify(store.health_json(base_url()))
+
     @app.route("/api/desktop/settings", methods=["POST"])
     def handle_desktop_settings():
+        if store.app_config.setup_complete and not store.admin_unlocked():
+            return json_error(403, "Admin PIN required.")
         selected_ip = sanitize_field(arg("selected_lan_ip", store.app_config.selected_lan_ip))
         configured_base_url = normalize_base_url(arg("configured_network_base_url", store.app_config.configured_network_base_url))
         with store.lock:
@@ -1810,22 +2233,87 @@ document.getElementById('category').addEventListener('change',load);document.get
 
     @app.route("/api/desktop/network-test", methods=["GET"])
     def handle_desktop_network_test():
-        status = store.status_json(base_url())
-        return jsonify(
-            {
-                "ok": True,
-                "local_pc_url": status["local_pc_url"],
-                "another_device_should_open": status["network_url"],
-                "checks": {
-                    "server_listening_on_all_interfaces": status["server_listening_all_interfaces"],
-                    "firewall_rule_installed": status["firewall_rule_installed"],
-                    "qr_url_is_not_loopback": not status["qr_loopback_warning"],
-                },
-            }
-        )
+        return jsonify(store.health_json(base_url()))
+
+    @app.route("/api/desktop/setup", methods=["POST"])
+    def handle_desktop_setup():
+        if store.app_config.setup_complete and not store.admin_unlocked():
+            return json_error(403, "Admin PIN required.")
+        selected_ip = sanitize_field(arg("selected_lan_ip", store.app_config.selected_lan_ip))
+        configured_base_url = normalize_base_url(arg("configured_network_base_url", store.app_config.configured_network_base_url))
+        admin_pin = trim_copy(arg("admin_pin"))
+        admin_pin_confirm = trim_copy(arg("admin_pin_confirm"))
+        if not store.admin_pin_is_configured() and not admin_pin and not admin_pin_confirm:
+            return json_error(400, "Create an admin PIN to complete first-run setup.")
+        with store.lock:
+            if selected_ip:
+                store.app_config.selected_lan_ip = selected_ip
+            if configured_base_url:
+                store.app_config.configured_network_base_url = configured_base_url
+            else:
+                store.app_config.configured_network_base_url = f"http://{store.app_config.selected_lan_ip}:{store.app_config.port}"
+            if admin_pin or admin_pin_confirm:
+                if admin_pin != admin_pin_confirm:
+                    return json_error(400, "Admin PIN entries do not match.")
+                try:
+                    store.save_admin_pin(admin_pin)
+                except ValueError as exc:
+                    return json_error(400, str(exc))
+                store.set_admin_unlock(True)
+            store.app_config.setup_complete = True
+            set_app_config_and_session_secret_if_needed()
+            store._save_app_config()
+            store.append_device_log("desktop_setup_saved", f"LAN URL set to {store.configured_base_url()}")
+        return jsonify({"ok": True, "message": "Setup saved. The LAN URL is now ready.", "status": store.status_json(base_url())})
+
+    @app.route("/api/desktop/admin", methods=["POST"])
+    def handle_desktop_admin():
+        action = trim_copy(arg("action"))
+        current_pin = read_pin_from_request("pin", "current_pin")
+        new_pin = trim_copy(arg("new_pin"))
+        confirm_pin = trim_copy(arg("confirm_pin"))
+
+        if action == "lock":
+            store.set_admin_unlock(False)
+            return jsonify({"ok": True, "message": "Admin settings locked."})
+
+        if action == "unlock":
+            if not store.admin_pin_is_configured():
+                if new_pin:
+                    if new_pin != confirm_pin:
+                        return json_error(400, "New PIN entries do not match.")
+                    try:
+                        store.save_admin_pin(new_pin)
+                    except ValueError as exc:
+                        return json_error(400, str(exc))
+                    store.set_admin_unlock(True)
+                    return jsonify({"ok": True, "message": "Admin PIN created and admin settings unlocked."})
+                return json_error(400, "No admin PIN exists yet. Create one first.")
+            if store.verify_admin_pin(current_pin):
+                store.set_admin_unlock(True)
+                return jsonify({"ok": True, "message": "Admin settings unlocked."})
+            return json_error(403, "Incorrect admin PIN.")
+
+        if action == "set_pin":
+            if new_pin != confirm_pin:
+                return json_error(400, "New PIN entries do not match.")
+            if store.admin_pin_is_configured() and not store.admin_unlocked():
+                if not store.verify_admin_pin(current_pin):
+                    return json_error(403, "Current admin PIN is required to change the PIN.")
+            try:
+                store.save_admin_pin(new_pin)
+            except ValueError as exc:
+                return json_error(400, str(exc))
+            store.set_admin_unlock(True)
+            return jsonify({"ok": True, "message": "Admin PIN updated and settings unlocked."})
+
+        return json_error(400, "Unknown admin action.")
 
     @app.route("/api/desktop/backup", methods=["POST"])
     def handle_desktop_backup():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
         backup = store.create_backup_zip("manual")
         return jsonify({"ok": True, "backup": backup.name, "path": str(backup)})
 
@@ -1839,6 +2327,9 @@ document.getElementById('category').addEventListener('change',load);document.get
 
     @app.route("/api/desktop/backup/import", methods=["POST"])
     def handle_desktop_backup_import():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
         if not request.files:
             return json_error(400, "No backup ZIP uploaded.")
         uploaded = next(iter(request.files.values()))
@@ -1864,6 +2355,9 @@ document.getElementById('category').addEventListener('change',load);document.get
 
     @app.route("/api/desktop/sd/import", methods=["POST"])
     def handle_desktop_sd_import():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
         mode = trim_copy(arg("mode", "merge"))
         if mode not in {"merge", "replace", "backup_replace"}:
             return json_error(400, "Invalid import mode.")
@@ -1876,6 +2370,9 @@ document.getElementById('category').addEventListener('change',load);document.get
     def handle_desktop_system():
         action = trim_copy(arg("action"))
         if action in {"enable_auto", "disable_auto", "set_auto", "stop_disable_auto"}:
+            ok, response = require_admin_access()
+            if not ok:
+                return response
             enabled = truthy(arg("enabled")) if action == "set_auto" else action == "enable_auto"
             ok, detail = set_windows_autorun(enabled)
             if action == "stop_disable_auto":
@@ -1930,10 +2427,16 @@ document.getElementById('category').addEventListener('change',load);document.get
 
     @app.route("/api/cloud-config", methods=["GET"])
     def handle_get_cloud_config():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
         return jsonify(store.cloud_config_json())
 
     @app.route("/api/cloud-config", methods=["POST"])
     def handle_save_cloud_config():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
         with store.lock:
             store.cloud_config.provider = sanitize_field(arg("provider", store.cloud_config.provider or "google_drive"))
             store.cloud_config.login_email = sanitize_field(arg("login_email", store.cloud_config.login_email))
@@ -1960,6 +2463,9 @@ document.getElementById('category').addEventListener('change',load);document.get
 
     @app.route("/api/google-auth/disconnect", methods=["POST"])
     def handle_google_disconnect():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
         with store.lock:
             store.google_state = GoogleState()
             store._save_google_state()
@@ -2449,6 +2955,33 @@ def run_self_test(app: Flask) -> None:
         assert "svg" in qr_resp.get_data(as_text=True)
 
 
+def open_browser_when_ready(store: DesktopStore) -> None:
+    target_url = store.setup_page_url() if not store.app_config.setup_complete else store.settings_page_url()
+    fallback_url = f"{store.local_pc_url()}/setup" if not store.app_config.setup_complete else f"{store.local_pc_url()}/settings"
+    lan_probe_url = f"{store.configured_base_url()}/api/status"
+    local_probe_url = f"{store.local_pc_url()}/api/status"
+
+    def worker() -> None:
+        deadline = time.monotonic() + 45
+        opened = False
+        while time.monotonic() < deadline:
+            lan_ok, _ = probe_url(lan_probe_url, timeout=1.5)
+            local_ok, _ = probe_url(local_probe_url, timeout=1.5)
+            if lan_ok:
+                webbrowser.open(target_url)
+                opened = True
+                break
+            if local_ok and time.monotonic() > deadline - 5:
+                webbrowser.open(fallback_url)
+                opened = True
+                break
+            time.sleep(1.0)
+        if not opened:
+            webbrowser.open(fallback_url)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=f"{APP_DISPLAY_NAME} Desktop App")
     parser.add_argument("--data-dir", type=Path, default=resolve_default_desktop_data_dir())
@@ -2470,11 +3003,13 @@ def main() -> None:
         return
 
     if args.open_browser:
-        webbrowser.open(f"http://127.0.0.1:{args.port}/")
+        open_browser_when_ready(store)
 
     print(f"{APP_DISPLAY_NAME} desktop listening on http://{args.host}:{args.port}/")
-    print(f"Local PC URL: http://127.0.0.1:{args.port}/")
+    print(f"Local PC URL: {store.local_pc_url()}/")
     print(f"LAN URL: {store.configured_base_url()}/")
+    if not store.app_config.setup_complete:
+        print(f"Setup URL: {store.setup_page_url()}")
     print(f"Data directory: {store.data_dir}")
     app.run(host=args.host, port=args.port, debug=False)
 

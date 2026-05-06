@@ -7,6 +7,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$legacyInstallDirs = @(
+  (Join-Path $env:ProgramFiles "StingrayInventoryDesktop"),
+  (Join-Path $env:ProgramFiles "Stingray Inventory Desktop")
+)
 
 function Test-IsAdministrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -79,9 +83,27 @@ if (Test-Path $startMenuDir) {
   Remove-Item -LiteralPath $startMenuDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+foreach ($legacyStartMenuDir in @(
+  (Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\StingrayInventoryDesktop"),
+  (Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Stingray Inventory Desktop")
+)) {
+  if (Test-Path $legacyStartMenuDir) {
+    Remove-Item -LiteralPath $legacyStartMenuDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 $desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Inventory.lnk"
 if (Test-Path $desktopShortcutPath) {
   Remove-Item -LiteralPath $desktopShortcutPath -Force -ErrorAction SilentlyContinue
+}
+
+foreach ($legacyDesktopShortcutPath in @(
+  (Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Stingray Inventory Desktop.lnk"),
+  (Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "StingrayInventoryDesktop.lnk")
+)) {
+  if (Test-Path $legacyDesktopShortcutPath) {
+    Remove-Item -LiteralPath $legacyDesktopShortcutPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 $legacyStartupShortcutPaths = @(
@@ -125,6 +147,12 @@ if ($RemoveData) {
     if (-not (Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)) {
       Remove-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
     }
+  }
+}
+
+foreach ($legacyInstallDir in $legacyInstallDirs) {
+  if (Test-Path $legacyInstallDir) {
+    Remove-Item -LiteralPath $legacyInstallDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 

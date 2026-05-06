@@ -3,7 +3,7 @@ param(
   [string]$DataDir = "$env:ProgramData\\Inventory\\data",
   [int]$Port = 8787,
   [string]$BrandName = "Inventory",
-  [string]$BrandLogoPath = "C:\\Users\\TALLEY\\Pictures\\stingray logo.png",
+  [string]$BrandLogoPath = "",
   [switch]$InstallNow
 )
 
@@ -76,7 +76,7 @@ if (-not (Test-Path $pythonExe)) {
 & $pythonExe -m pip install --upgrade --upgrade-strategy eager -r (Join-Path $scriptDir "requirements.txt")
 & $pythonExe -m pip install --upgrade pyinstaller
 
-if (Test-Path $BrandLogoPath) {
+if ($BrandLogoPath -and (Test-Path $BrandLogoPath)) {
   New-Item -ItemType Directory -Force -Path $brandingDir | Out-Null
   Copy-Item -LiteralPath $BrandLogoPath -Destination $bundledBrandLogo -Force
 }
