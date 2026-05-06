@@ -145,6 +145,7 @@ After unlocking admin settings, use **Import Inventory Folder**:
 
 - Enter a copied inventory folder path, such as `C:\Users\TALLEY\Desktop\old inventory`.
 - You can also point it at a copied SD-style folder from an older Stingray export.
+- Or click **Choose Folder...** and pick the folder in Windows, or drag the folder onto the drop zone.
 - Preview first.
 - Choose merge or replace-after-backup.
 - Import always creates a backup first in `C:\ProgramData\Inventory\backups`.

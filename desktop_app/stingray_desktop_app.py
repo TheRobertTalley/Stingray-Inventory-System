@@ -567,6 +567,7 @@ class DesktopStore:
         self.backups_dir = self.root_dir / "backups"
         self.logs_dir = self.root_dir / "logs"
         self.config_dir = self.root_dir / "config"
+        self.import_uploads_dir = self.root_dir / "import_uploads"
         self.images_dir = self.data_dir / "images"
         self.inventory_file = self.data_dir / "inventory.csv"
         self.inventory_tmp_file = self.data_dir / "inventory.tmp"
@@ -590,6 +591,7 @@ class DesktopStore:
         self.cloud_config = CloudConfig()
         self.google_state = GoogleState()
         self.app_config = DesktopConfig(bind_host=bind_host, port=port)
+        self.pending_import_uploads: dict[str, dict[str, Any]] = {}
         self.index_html, self.item_html = self._load_ui_assets(firmware_ino)
         self._ensure_data_files()
         self._load_app_config(bind_host, port)
@@ -667,6 +669,7 @@ class DesktopStore:
         self.backups_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.import_uploads_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_tree()
         if not self.inventory_file.exists():
@@ -1324,6 +1327,115 @@ class DesktopStore:
         suggestions.sort(key=lambda entry: (entry["inventory_items_found"], entry["images_found"], len(entry["files_found"])), reverse=True)
         return suggestions[:5]
 
+    def _normalize_uploaded_relative_path(self, filename: str) -> Path | None:
+        text = trim_copy(filename).replace("\\", "/")
+        if not text:
+            return None
+        candidate = Path(text)
+        if candidate.is_absolute() or candidate.drive:
+            return None
+        parts = [part for part in candidate.parts if part not in {"", ".", ".."}]
+        if not parts:
+            return None
+        return Path(*parts)
+
+    def _staged_import_path(self, token: str) -> Path:
+        return self.import_uploads_dir / trim_copy(token)
+
+    def discard_staged_import(self, token: str) -> None:
+        stage_dir = self._staged_import_path(token)
+        with self.lock:
+            self.pending_import_uploads.pop(trim_copy(token), None)
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir, ignore_errors=True)
+
+    def stage_import_uploads(self, uploads: list[Any], source_label: str = "") -> dict[str, Any]:
+        valid_uploads: list[tuple[Any, Path]] = []
+        errors: list[str] = []
+        for uploaded in uploads:
+            raw_name = trim_copy(getattr(uploaded, "filename", ""))
+            rel_path = self._normalize_uploaded_relative_path(raw_name)
+            if rel_path is None:
+                errors.append(f"Skipped invalid upload path: {raw_name[:80]}")
+                continue
+            valid_uploads.append((uploaded, rel_path))
+
+        if not valid_uploads:
+            raise ValueError("No valid files were uploaded from the selected folder.")
+
+        token = uuid.uuid4().hex
+        stage_dir = self._staged_import_path(token)
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        for uploaded, rel_path in valid_uploads:
+            target = stage_dir / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            uploaded.save(target)
+
+        first_parts = valid_uploads[0][1].parts
+        label = trim_copy(source_label) or (first_parts[0] if first_parts else stage_dir.name)
+        try:
+            preview = self.preview_sd_import(stage_dir)
+            payload = {
+                "ok": True,
+                "token": token,
+                "source_label": label,
+                "staged_path": str(stage_dir),
+                "uploaded_files": len(valid_uploads),
+                "errors": errors,
+                "preview": preview,
+            }
+            with self.lock:
+                self.pending_import_uploads[token] = {
+                    "path": str(stage_dir),
+                    "source_label": label,
+                    "created_at": current_timestamp(),
+                }
+            return payload
+        except Exception:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
+
+    def staged_import_preview(self, token: str) -> dict[str, Any]:
+        token = trim_copy(token)
+        if not token:
+            raise ValueError("Missing staged import token.")
+        with self.lock:
+            entry = self.pending_import_uploads.get(token)
+        if not entry:
+            raise ValueError("Staged folder import not found.")
+        stage_dir = Path(entry["path"])
+        if not stage_dir.exists():
+            self.discard_staged_import(token)
+            raise ValueError("Staged folder import expired or was removed.")
+        preview = self.preview_sd_import(stage_dir)
+        preview["token"] = token
+        preview["source_label"] = entry.get("source_label", "")
+        preview["staged"] = True
+        return preview
+
+    def import_staged_upload(self, token: str, mode: str) -> dict[str, Any]:
+        token = trim_copy(token)
+        if not token:
+            raise ValueError("Missing staged import token.")
+        with self.lock:
+            entry = self.pending_import_uploads.get(token)
+        if not entry:
+            raise ValueError("Staged folder import not found.")
+        stage_dir = Path(entry["path"])
+        if not stage_dir.exists():
+            self.discard_staged_import(token)
+            raise ValueError("Staged folder import expired or was removed.")
+        try:
+            result = self.import_sd_folder(stage_dir, mode)
+        finally:
+            self.discard_staged_import(token)
+        result["token"] = token
+        result["source_label"] = entry.get("source_label", "")
+        return result
+
     def preview_sd_import(self, folder: Path) -> dict[str, Any]:
         requested_folder = folder
         folder, messages = self.resolve_sd_import_root(folder)
@@ -1714,6 +1826,35 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     font-size: 0.9rem;
     opacity: 0.85;
   }}
+  .desktop-folder-tools {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin: 0.75rem 0;
+  }}
+  .desktop-folder-tools button {{
+    width: auto;
+    min-width: 160px;
+  }}
+  .desktop-dropzone {{
+    border: 2px dashed rgba(90, 120, 145, 0.55);
+    border-radius: 16px;
+    background: rgba(245, 248, 251, 0.75);
+    color: var(--ink);
+    min-height: 88px;
+    padding: 0.95rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    margin-top: 0.35rem;
+    user-select: none;
+    cursor: copy;
+  }}
+  .desktop-dropzone.dragging {{
+    border-color: rgba(90, 190, 120, 0.95);
+    background: rgba(90, 190, 120, 0.16);
+  }}
   .desktop-wizard {{
     border: 1px solid rgba(120, 120, 120, 0.28);
     border-radius: 18px;
@@ -1879,6 +2020,15 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
             </select>
           </label>
         </div>
+        <div class="desktop-folder-tools">
+          <input id="desktop-folder-picker" type="file" webkitdirectory directory multiple hidden>
+          <button id="desktop-folder-picker-btn" type="button" class="secondary">Choose Folder...</button>
+          <button id="desktop-folder-clear-btn" type="button" class="secondary" hidden>Clear Selected Folder</button>
+        </div>
+        <div id="desktop-folder-dropzone" class="desktop-dropzone" tabindex="0" role="button" aria-label="Drop an inventory folder here">
+          Drop an inventory folder here, or choose one above.
+        </div>
+        <pre id="desktop-folder-summary" class="cloud-status">No folder selected.</pre>
         <div class="cloud-actions">
           <button id="desktop-backup-btn" type="button">Backup Current Data</button>
           <input id="desktop-backup-file" type="file" accept=".zip">
@@ -1900,13 +2050,20 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 (function(){
   const $ = (id) => document.getElementById(id);
   const useOldInventoryBtn = $('desktop-use-old-inventory-btn');
+  const folderPickerBtn = $('desktop-folder-picker-btn');
+  const folderPickerInput = $('desktop-folder-picker');
+  const folderDropzone = $('desktop-folder-dropzone');
+  const folderClearBtn = $('desktop-folder-clear-btn');
   let importSuggestions = [];
+  let stagedImportToken = '';
+  let stagedImportLabel = '';
+  let stagedImportPreview = null;
   async function json(url, options) {
     const response = await fetch(url, options || {});
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || data.message || `Request failed (${response.status})`);
     return data;
-  }
+  }}
   async function post(url, body) {
     return json(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
   }
@@ -2060,9 +2217,21 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     }
   }
   async function previewSd() {
+    if (stagedImportToken) {
+      const preview = await previewStagedFolder();
+      $('desktop-import-status').textContent = JSON.stringify(preview, null, 2);
+      return;
+    }
     $('desktop-import-status').textContent = JSON.stringify(await json(`/api/desktop/sd/preview?path=${encodeURIComponent($('desktop-sd-path').value)}`), null, 2);
   }
   async function importSd() {
+    if (stagedImportToken) {
+      const result = await post('/api/desktop/sd/import', {token: stagedImportToken, mode: $('desktop-sd-mode').value});
+      clearStagedFolder();
+      $('desktop-import-status').textContent = JSON.stringify(result, null, 2);
+      await refreshStatus();
+      return;
+    }
     $('desktop-import-status').textContent = JSON.stringify(await post('/api/desktop/sd/import', {path: $('desktop-sd-path').value, mode: $('desktop-sd-mode').value}), null, 2);
   }
   async function backup() {
@@ -2083,6 +2252,138 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     if (!response.ok) throw new Error(data.error || `Import failed (${response.status})`);
     $('desktop-import-status').textContent = JSON.stringify(data, null, 2);
   }
+  function folderSummaryText() {
+    if (!stagedImportToken) {
+      return 'No folder selected.';
+    }
+    const preview = stagedImportPreview || {};
+    const label = stagedImportLabel || preview.source_label || 'Selected folder';
+    return [
+      `Folder staged: ${label}`,
+      `Token: ${stagedImportToken}`,
+      `Items found: ${preview.inventory_items_found ?? 0}`,
+      `Orders found: ${preview.orders_found ?? 0}`,
+      `Images found: ${preview.images_found ?? 0}`,
+      `Transactions found: ${preview.transaction_rows_found ?? 0}`,
+      `Device log rows found: ${preview.device_log_rows_found ?? 0}`,
+      `Time log rows found: ${preview.time_log_rows_found ?? 0}`,
+      '',
+      'Use Preview Folder Import to review the staged folder, then Import Inventory Folder to bring it in.'
+    ].join('\n');
+  }
+  function refreshFolderSummary() {
+    if ($('desktop-folder-summary')) {
+      $('desktop-folder-summary').textContent = folderSummaryText();
+    }
+    if (folderClearBtn) {
+      folderClearBtn.hidden = !stagedImportToken;
+    }
+  }
+  function clearStagedFolder() {
+    stagedImportToken = '';
+    stagedImportLabel = '';
+    stagedImportPreview = null;
+    if (folderPickerInput) {
+      folderPickerInput.value = '';
+    }
+    if (folderDropzone) {
+      folderDropzone.classList.remove('dragging');
+    }
+    refreshFolderSummary();
+  }
+  function guessFolderLabel(entries) {
+    const first = entries.length ? String(entries[0].relativePath || entries[0].file && entries[0].file.webkitRelativePath || entries[0].file && entries[0].file.name || '') : '';
+    if (!first) return 'Selected folder';
+    const parts = first.split(/[\\/]/).filter(Boolean);
+    return parts.length > 1 ? parts[0] : 'Selected folder';
+  }
+  function collectPickerEntries() {
+    if (!folderPickerInput || !folderPickerInput.files) return [];
+    return Array.from(folderPickerInput.files).map((file) => ({
+      file,
+      relativePath: file.webkitRelativePath || file.name,
+    }));
+  }
+  async function readDirectoryEntry(entry, prefix, results) {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      results.push({file, relativePath: `${prefix}${file.name}`});
+      return;
+    }
+    if (!entry.isDirectory) {
+      return;
+    }
+    const reader = entry.createReader();
+    while (true) {
+      const children = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      if (!children.length) {
+        break;
+      }
+      for (const child of children) {
+        await readDirectoryEntry(child, `${prefix}${entry.name}/`, results);
+      }
+    }
+  }
+  async function collectDroppedEntries(dataTransfer) {
+    const results = [];
+    const items = Array.from((dataTransfer && dataTransfer.items) || []);
+    if (items.length) {
+      for (const item of items) {
+        const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+        if (entry) {
+          await readDirectoryEntry(entry, '', results);
+          continue;
+        }
+        const file = item.getAsFile ? item.getAsFile() : null;
+        if (file) {
+          results.push({file, relativePath: file.webkitRelativePath || file.name});
+        }
+      }
+    }
+    if (!results.length && dataTransfer && dataTransfer.files) {
+      Array.from(dataTransfer.files).forEach((file) => {
+        results.push({file, relativePath: file.webkitRelativePath || file.name});
+      });
+    }
+    return results;
+  }
+  async function stageFolderEntries(entries, sourceLabel) {
+    if (!entries.length) {
+      throw new Error('No folder files were selected.');
+    }
+    const form = new FormData();
+    form.append('source_label', sourceLabel || 'Selected folder');
+    entries.forEach((entry) => {
+      form.append('files', entry.file, entry.relativePath || entry.file.name);
+    });
+    const response = await fetch('/api/desktop/import/upload', {method:'POST', body: form});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `Folder upload failed (${response.status})`);
+    stagedImportToken = data.token || '';
+    stagedImportLabel = data.source_label || sourceLabel || 'Selected folder';
+    stagedImportPreview = data.preview || null;
+    if ($('desktop-import-status')) {
+      $('desktop-import-status').textContent = `Folder staged: ${stagedImportLabel}. Preview and import controls now use the staged upload.`;
+    }
+    refreshFolderSummary();
+    return data;
+  }
+  async function stageSelectedFolder(entries, label) {
+    const data = await stageFolderEntries(entries, label);
+    if ($('desktop-folder-summary')) {
+      $('desktop-folder-summary').textContent = JSON.stringify(data.preview || data, null, 2);
+    }
+    return data;
+  }
+  async function previewStagedFolder() {
+    if (!stagedImportToken) {
+      return null;
+    }
+    const preview = await post('/api/desktop/import/staged/preview', {token: stagedImportToken});
+    stagedImportPreview = preview;
+    refreshFolderSummary();
+    return preview;
+  }
   async function loadImportSuggestions() {
     const response = await json('/api/desktop/import/suggestions');
     const suggestions = Array.isArray(response.suggestions) ? response.suggestions : [];
@@ -2102,6 +2403,20 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     }
     return suggestions;
   }
+  async function handleFolderSelection() {
+    const entries = collectPickerEntries();
+    const label = guessFolderLabel(entries);
+    await stageSelectedFolder(entries, label);
+  }
+  async function handleFolderDrop(event) {
+    event.preventDefault();
+    if (folderDropzone) {
+      folderDropzone.classList.remove('dragging');
+    }
+    const entries = await collectDroppedEntries(event.dataTransfer);
+    const label = guessFolderLabel(entries);
+    await stageSelectedFolder(entries, label);
+  }
   document.addEventListener('DOMContentLoaded', () => {
     if (!$('desktop-health-panel')) return;
     $('desktop-save-network-btn').addEventListener('click', saveNetwork);
@@ -2117,6 +2432,33 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     $('desktop-restart-btn').addEventListener('click', () => system('restart'));
     $('desktop-stop-btn').addEventListener('click', () => system('stop'));
     $('desktop-stop-disable-btn').addEventListener('click', () => system('stop_disable_auto'));
+    if (folderPickerBtn && folderPickerInput) {
+      folderPickerBtn.addEventListener('click', () => folderPickerInput.click());
+      folderPickerInput.addEventListener('change', () => handleFolderSelection().catch((error) => $('desktop-import-status').textContent = error.message));
+    }
+    if (folderClearBtn) {
+      folderClearBtn.addEventListener('click', () => {
+        clearStagedFolder();
+        $('desktop-import-status').textContent = 'Folder selection cleared.';
+      });
+    }
+    if (folderDropzone) {
+      folderDropzone.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        folderDropzone.classList.add('dragging');
+      });
+      folderDropzone.addEventListener('dragleave', () => {
+        folderDropzone.classList.remove('dragging');
+      });
+      folderDropzone.addEventListener('drop', (event) => handleFolderDrop(event).catch((error) => $('desktop-import-status').textContent = error.message));
+      folderDropzone.addEventListener('click', () => folderPickerInput && folderPickerInput.click());
+      folderDropzone.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          folderPickerInput && folderPickerInput.click();
+        }
+      });
+    }
     if (useOldInventoryBtn) {
       useOldInventoryBtn.addEventListener('click', async () => {
         try {
@@ -2142,6 +2484,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         $('desktop-import-status').textContent = error.message;
       }
     });
+    refreshFolderSummary();
     refreshStatus();
   });
 })();
@@ -2488,6 +2831,31 @@ document.getElementById('category').addEventListener('change',load);document.get
             "default_path": str(Path.home() / "Desktop" / "old inventory"),
         })
 
+    @app.route("/api/desktop/import/upload", methods=["POST"])
+    def handle_desktop_import_upload():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
+        files = request.files.getlist("files")
+        if not files:
+            return json_error(400, "No folder files were uploaded.")
+        source_label = sanitize_field(arg("source_label"))
+        try:
+            return jsonify(store.stage_import_uploads(files, source_label))
+        except ValueError as exc:
+            return json_error(400, str(exc))
+
+    @app.route("/api/desktop/import/staged/preview", methods=["POST"])
+    def handle_desktop_import_staged_preview():
+        ok, response = require_admin_access()
+        if not ok:
+            return response
+        token = trim_copy(arg("token"))
+        try:
+            return jsonify(store.staged_import_preview(token))
+        except ValueError as exc:
+            return json_error(400, str(exc))
+
     @app.route("/api/desktop/sd/import", methods=["POST"])
     def handle_desktop_sd_import():
         ok, response = require_admin_access()
@@ -2496,6 +2864,12 @@ document.getElementById('category').addEventListener('change',load);document.get
         mode = trim_copy(arg("mode", "merge"))
         if mode not in {"merge", "replace", "backup_replace"}:
             return json_error(400, "Invalid import mode.")
+        token = trim_copy(arg("token"))
+        if token:
+            try:
+                return jsonify(store.import_staged_upload(token, mode))
+            except ValueError as exc:
+                return json_error(400, str(exc))
         try:
             return jsonify(store.import_sd_folder(normalize_local_folder_path(arg("path")), mode))
         except ValueError as exc:

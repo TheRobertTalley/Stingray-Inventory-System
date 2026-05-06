@@ -43,6 +43,7 @@ The Windows desktop app is LAN-first: it listens on `0.0.0.0:8787`, remains avai
 The desktop build is Ethernet/LAN-first on Windows; there is no Wi-Fi scanning workflow in the PC app.
 Backups are portable between computers and restore inventory, orders, logs, and images without carrying over the old PC's LAN settings.
 The desktop app can also import an existing inventory folder from the Windows PC, such as `C:\Users\TALLEY\Desktop\old inventory`, through the Settings page import workflow.
+The Settings import workflow supports typing a path, choosing a folder in Windows, or dragging the folder onto the drop zone.
 
 - Desktop entry point: `desktop_app/stingray_desktop_app.py`
 - One-command setup/run on Windows: `desktop_app/install_and_run.ps1`

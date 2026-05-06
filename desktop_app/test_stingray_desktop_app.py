@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
+from werkzeug.datastructures import MultiDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -369,10 +370,59 @@ class DesktopAppTests(unittest.TestCase):
         self.assertIn("Ethernet uplinks are fine", settings_html)
         self.assertNotIn("Nearby Networks", settings_html)
         self.assertNotIn("scan networks", settings_html.lower())
+        self.assertIn("desktop-folder-picker-btn", settings_html)
+        self.assertIn("desktop-folder-dropzone", settings_html)
+        self.assertIn("webkitdirectory", settings_html)
+        self.assertIn("Choose Folder...", settings_html)
         self.assertIn("settings-nav-link", settings_html)
         self.assertIn("exactOpen(value)", inventory_html)
         self.assertIn("desktop-edit-panel", item_html)
         self.assertIn("manual-panel", item_html)
+
+    def test_folder_picker_upload_stages_and_imports_inventory_folder(self):
+        client, store = self.make_client()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / "Desktop" / "old inventory"
+        images = root / "images"
+        ui = root / "ui"
+        images.mkdir(parents=True)
+        ui.mkdir(parents=True)
+        (root / "inventory.csv").write_text(
+            "part_number|category|part_name|qr_code|color|material|qty|image_ref|bom_product|bom_qty|updated_at\n"
+            "PICK1|part|Picker Item|QR|||8|/images/picker.png||0|2026\n",
+            encoding="utf-8",
+        )
+        (root / "orders.json").write_text('{"orders":[{"order_number":"PICK-1","created_at":"2026","updated_at":"2026","lines":[]}]}', encoding="utf-8")
+        (root / "transactions.csv").write_text("timestamp|item_id|action|delta|qty_after|note\n2026|PICK1|import|8|8|picker\n", encoding="utf-8")
+        (images / "picker.png").write_bytes(b"picker")
+        (ui / "index.html").write_text("<html>picker</html>", encoding="utf-8")
+
+        uploads = []
+        for path in root.rglob("*"):
+            if path.is_file():
+                uploads.append(("files", (io.BytesIO(path.read_bytes()), path.relative_to(Path(tmp.name)).as_posix())))
+
+        upload = client.post(
+            "/api/desktop/import/upload",
+            data=MultiDict([("source_label", "Desktop old inventory"), *uploads]),
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(upload.status_code, 200)
+        staged = upload.get_json()
+        self.assertIn("token", staged)
+        self.assertEqual(staged["preview"]["inventory_items_found"], 1)
+        self.assertEqual(staged["preview"]["orders_found"], 1)
+        self.assertEqual(staged["preview"]["images_found"], 1)
+
+        imported = client.post("/api/desktop/sd/import", json={"token": staged["token"], "mode": "backup_replace"})
+        self.assertEqual(imported.status_code, 200)
+        result = imported.get_json()
+        self.assertEqual(result["items_imported"], 1)
+        self.assertEqual(result["orders_added"], 1)
+        self.assertTrue((store.images_dir / "picker.png").exists())
+        item = client.get("/api/item?id=PICK1").get_json()["item"]
+        self.assertEqual(item["qty"], 8)
 
     def test_desktop_status_reports_lan_transport_not_wifi(self):
         client, _ = self.make_client()
