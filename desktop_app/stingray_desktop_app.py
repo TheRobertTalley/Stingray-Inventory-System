@@ -31,11 +31,17 @@ DEVICE_LOG_HEADER = "timestamp|mac_address|uptime_seconds|event|detail"
 TIME_LOG_HEADER = "timestamp|event|detail"
 CLOUD_CONFIG_HEADER = "provider|login_email|folder_name|folder_hint|mode|backup_mode|asset_mode|brand_name|brand_logo_ref|client_id|client_secret|updated_at"
 GOOGLE_STATE_HEADER = "refresh_token|folder_id|last_sync_at|last_synced_manifest_hash|last_synced_snapshot_at|local_snapshot_at|auth_status|sync_status|last_error"
+APP_DISPLAY_NAME = "Inventory"
+LEGACY_APP_DISPLAY_NAME = "Stingray Inventory Desktop"
+PROGRAM_DATA_ROOT_NAME = "Inventory"
+LEGACY_PROGRAM_DATA_ROOT_NAME = "StingrayInventoryDesktop"
 DEFAULT_CATEGORY = "part"
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 APP_CONFIG_FILE = "desktop_config.json"
-FIREWALL_RULE_NAME = "Stingray Inventory Desktop LAN"
-SYSTEM_TASK_NAME = "Stingray Inventory Desktop (System Startup)"
+FIREWALL_RULE_NAME = "Inventory LAN"
+LEGACY_FIREWALL_RULE_NAME = "Stingray Inventory Desktop LAN"
+SYSTEM_TASK_NAME = "Inventory (System Startup)"
+LEGACY_SYSTEM_TASK_NAME = "Stingray Inventory Desktop (System Startup)"
 IMPORT_COPY_FILES = [
     "inventory.csv",
     "orders.json",
@@ -59,6 +65,34 @@ def runtime_root() -> Path:
 
 def default_firmware_ino_path() -> Path:
     return runtime_root() / "firmware" / "StingrayInventoryESP32" / "StingrayInventoryESP32.ino"
+
+
+def default_program_data_root() -> Path:
+    return Path(os.environ.get("PROGRAMDATA", str(Path.home()))) / PROGRAM_DATA_ROOT_NAME
+
+
+def legacy_program_data_root() -> Path:
+    return Path(os.environ.get("PROGRAMDATA", str(Path.home()))) / LEGACY_PROGRAM_DATA_ROOT_NAME
+
+
+def resolve_default_desktop_data_dir() -> Path:
+    new_dir = default_program_data_root() / "data"
+    legacy_dir = legacy_program_data_root() / "data"
+    if new_dir.exists():
+        return new_dir
+
+    legacy_markers = [
+        legacy_dir / "inventory.csv",
+        legacy_dir / "orders.json",
+        legacy_dir / "transactions.csv",
+        legacy_dir / APP_CONFIG_FILE,
+        legacy_dir / "cloud_backup.cfg",
+        legacy_dir / "google_drive_state.cfg",
+    ]
+    if any(marker.exists() for marker in legacy_markers):
+        return legacy_dir
+
+    return new_dir
 
 
 @dataclass
@@ -283,39 +317,54 @@ def firewall_rule_status(port: int) -> dict[str, Any]:
     if os.name != "nt":
         return {"supported": False, "installed": False, "detail": "Windows Firewall check is Windows-only."}
     try:
-        result = subprocess.run(
-            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={FIREWALL_RULE_NAME}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        text = (result.stdout or "") + (result.stderr or "")
-        installed = result.returncode == 0 and FIREWALL_RULE_NAME in text
-        return {"supported": True, "installed": installed, "detail": "Installed" if installed else f"Missing TCP {port} rule"}
+        for rule_name in (FIREWALL_RULE_NAME, LEGACY_FIREWALL_RULE_NAME):
+            result = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            text = (result.stdout or "") + (result.stderr or "")
+            installed = result.returncode == 0 and rule_name in text
+            if installed:
+                return {
+                    "supported": True,
+                    "installed": True,
+                    "name": rule_name,
+                    "detail": "Installed" if rule_name == FIREWALL_RULE_NAME else f"Installed via legacy rule name: {rule_name}",
+                }
+        return {"supported": True, "installed": False, "name": FIREWALL_RULE_NAME, "detail": f"Missing TCP {port} rule"}
     except Exception as exc:
-        return {"supported": True, "installed": False, "detail": f"Unable to check firewall: {exc}"}
+        return {"supported": True, "installed": False, "name": FIREWALL_RULE_NAME, "detail": f"Unable to check firewall: {exc}"}
 
 
 def scheduled_task_status(task_name: str = SYSTEM_TASK_NAME) -> dict[str, Any]:
     if os.name != "nt":
         return {"supported": False, "exists": False, "enabled": False, "running": False, "detail": "Windows-only."}
     try:
-        result = subprocess.run(
-            ["schtasks", "/Query", "/TN", task_name, "/FO", "LIST", "/V"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        text = result.stdout or ""
-        exists = result.returncode == 0 and task_name in text
-        running = exists and re.search(r"Status:\s+Running", text, re.I) is not None
-        disabled = re.search(r"Scheduled Task State:\s+Disabled", text, re.I) is not None
-        enabled = exists and (running or not disabled)
-        return {"supported": True, "exists": exists, "enabled": enabled, "running": running, "detail": "Installed" if exists else "Not installed"}
+        candidates = [task_name]
+        if task_name == SYSTEM_TASK_NAME:
+            candidates.append(LEGACY_SYSTEM_TASK_NAME)
+        for candidate in candidates:
+            result = subprocess.run(
+                ["schtasks", "/Query", "/TN", candidate, "/FO", "LIST", "/V"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            text = result.stdout or ""
+            exists = result.returncode == 0 and candidate in text
+            running = exists and re.search(r"Status:\s+Running", text, re.I) is not None
+            disabled = re.search(r"Scheduled Task State:\s+Disabled", text, re.I) is not None
+            enabled = exists and (running or not disabled)
+            if exists:
+                detail = "Installed" if candidate == SYSTEM_TASK_NAME else f"Installed via legacy task name: {candidate}"
+                return {"supported": True, "exists": True, "enabled": enabled, "running": running, "name": candidate, "detail": detail}
+        return {"supported": True, "exists": False, "enabled": False, "running": False, "name": task_name, "detail": "Not installed"}
     except Exception as exc:
-        return {"supported": True, "exists": False, "enabled": False, "running": False, "detail": f"Unable to check task: {exc}"}
+        return {"supported": True, "exists": False, "enabled": False, "running": False, "name": task_name, "detail": f"Unable to check task: {exc}"}
 
 
 def run_command(args: list[str]) -> tuple[bool, str]:
@@ -334,7 +383,14 @@ def set_windows_autorun(enabled: bool) -> tuple[bool, str]:
     if os.name != "nt":
         return False, "Windows only"
     action = "/ENABLE" if enabled else "/DISABLE"
-    ok, detail = run_command(["schtasks", "/Change", "/TN", SYSTEM_TASK_NAME, action])
+    task_status = scheduled_task_status()
+    task_name = task_status.get("name") or SYSTEM_TASK_NAME
+    ok, detail = run_command(["schtasks", "/Change", "/TN", task_name, action])
+    if not ok and task_name == SYSTEM_TASK_NAME:
+        legacy_ok, legacy_detail = run_command(["schtasks", "/Change", "/TN", LEGACY_SYSTEM_TASK_NAME, action])
+        if legacy_ok:
+            return legacy_ok, legacy_detail
+        detail = legacy_detail
     if not ok and not enabled:
         lowered = detail.lower()
         if "cannot find" in lowered or "does not exist" in lowered:
@@ -459,21 +515,25 @@ def resolved_child(folder: Path, name: str) -> Path:
 class DesktopStore:
     def __init__(self, data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.0.0", port: int = 8787) -> None:
         self.data_dir = data_dir
-        self.backups_dir = self.data_dir.parent / "backups"
+        self.root_dir = self.data_dir.parent
+        self.legacy_root_dir = self.root_dir.parent / LEGACY_PROGRAM_DATA_ROOT_NAME if self.root_dir.name != LEGACY_PROGRAM_DATA_ROOT_NAME else self.root_dir
+        self.backups_dir = self.root_dir / "backups"
+        self.logs_dir = self.root_dir / "logs"
+        self.config_dir = self.root_dir / "config"
         self.images_dir = self.data_dir / "images"
         self.inventory_file = self.data_dir / "inventory.csv"
         self.inventory_tmp_file = self.data_dir / "inventory.tmp"
         self.orders_file = self.data_dir / "orders.json"
         self.orders_tmp_file = self.data_dir / "orders.tmp"
         self.transaction_file = self.data_dir / "transactions.csv"
-        self.device_log_file = self.data_dir / "device_log.csv"
-        self.time_log_file = self.data_dir / "time_log.csv"
-        self.cloud_config_file = self.data_dir / "cloud_backup.cfg"
-        self.cloud_config_tmp_file = self.data_dir / "cloud_backup.tmp"
-        self.google_state_file = self.data_dir / "google_drive_state.cfg"
-        self.google_state_tmp_file = self.data_dir / "google_drive_state.tmp"
-        self.app_config_file = self.data_dir / APP_CONFIG_FILE
-        self.app_config_tmp_file = self.data_dir / "desktop_config.tmp"
+        self.device_log_file = self.logs_dir / "device_log.csv"
+        self.time_log_file = self.logs_dir / "time_log.csv"
+        self.cloud_config_file = self.config_dir / "cloud_backup.cfg"
+        self.cloud_config_tmp_file = self.config_dir / "cloud_backup.tmp"
+        self.google_state_file = self.config_dir / "google_drive_state.cfg"
+        self.google_state_tmp_file = self.config_dir / "google_drive_state.tmp"
+        self.app_config_file = self.config_dir / APP_CONFIG_FILE
+        self.app_config_tmp_file = self.config_dir / "desktop_config.tmp"
         self.lock = threading.RLock()
         self.start_monotonic = time.monotonic()
         self.mac_address = self._mac_address_string()
@@ -524,10 +584,44 @@ class DesktopStore:
                 return
         path.write_text(header + "\n", encoding="utf-8")
 
+    def _migrate_file_if_present(self, legacy_path: Path, new_path: Path) -> None:
+        if new_path.exists() or not legacy_path.exists():
+            return
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_path, new_path)
+
+    def _migrate_legacy_tree(self) -> None:
+        if self.legacy_root_dir == self.root_dir:
+            return
+        legacy_data_dir = self.legacy_root_dir / "data"
+        if not legacy_data_dir.exists():
+            return
+
+        self._migrate_file_if_present(legacy_data_dir / "inventory.csv", self.inventory_file)
+        self._migrate_file_if_present(legacy_data_dir / "orders.json", self.orders_file)
+        self._migrate_file_if_present(legacy_data_dir / "transactions.csv", self.transaction_file)
+        self._migrate_file_if_present(legacy_data_dir / "device_log.csv", self.device_log_file)
+        self._migrate_file_if_present(legacy_data_dir / "time_log.csv", self.time_log_file)
+        self._migrate_file_if_present(legacy_data_dir / "cloud_backup.cfg", self.cloud_config_file)
+        self._migrate_file_if_present(legacy_data_dir / "google_drive_state.cfg", self.google_state_file)
+        self._migrate_file_if_present(legacy_data_dir / APP_CONFIG_FILE, self.app_config_file)
+
+        legacy_images_dir = legacy_data_dir / "images"
+        if legacy_images_dir.exists():
+            for src in legacy_images_dir.rglob("*"):
+                if src.is_file():
+                    dst = self.images_dir / src.relative_to(legacy_images_dir)
+                    if not dst.exists():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+
     def _ensure_data_files(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.backups_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.config_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_tree()
         if not self.inventory_file.exists():
             self.inventory_file.write_text(INVENTORY_HEADER + "\n", encoding="utf-8")
         if not self.orders_file.exists():
@@ -1223,6 +1317,8 @@ class DesktopStore:
         firewall = firewall_rule_status(self.app_config.port)
         task = scheduled_task_status()
         payload = {
+            "app_name": APP_DISPLAY_NAME,
+            "legacy_app_name": LEGACY_APP_DISPLAY_NAME,
             "board": "PC_DESKTOP",
             "device_id": self.device_id,
             "storage_mode": "pc_fs",
@@ -1238,13 +1334,17 @@ class DesktopStore:
             "server_listening_all_interfaces": self.app_config.bind_host in {"0.0.0.0", "::"},
             "firewall_rule": firewall,
             "firewall_rule_installed": firewall.get("installed", False),
+            "firewall_rule_name": firewall.get("name", FIREWALL_RULE_NAME),
             "auto_run": task,
             "auto_run_enabled": task.get("enabled", False),
+            "auto_run_task_name": task.get("name", SYSTEM_TASK_NAME),
             "run_mode": "Scheduled Task" if task.get("exists") else "Manual",
             "supervisor_active": task.get("running", False),
             "qr_loopback_warning": is_loopback_host(host),
             "data_dir": str(self.data_dir),
             "backups_dir": str(self.backups_dir),
+            "logs_dir": str(self.logs_dir),
+            "config_dir": str(self.config_dir),
             "brand_name": self.cloud_config.brand_name,
             "brand_logo_ref": self.cloud_config.brand_logo_ref,
             "backup_mode": self.cloud_config.backup_mode,
@@ -2350,8 +2450,8 @@ def run_self_test(app: Flask) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stingray Inventory Desktop App")
-    parser.add_argument("--data-dir", type=Path, default=Path(os.environ.get("PROGRAMDATA", str(Path.home()))) / "StingrayInventoryDesktop" / "data")
+    parser = argparse.ArgumentParser(description=f"{APP_DISPLAY_NAME} Desktop App")
+    parser.add_argument("--data-dir", type=Path, default=resolve_default_desktop_data_dir())
     parser.add_argument(
         "--firmware-ino",
         type=Path,
@@ -2372,7 +2472,7 @@ def main() -> None:
     if args.open_browser:
         webbrowser.open(f"http://127.0.0.1:{args.port}/")
 
-    print(f"Stingray Desktop listening on http://{args.host}:{args.port}/")
+    print(f"{APP_DISPLAY_NAME} desktop listening on http://{args.host}:{args.port}/")
     print(f"Local PC URL: http://127.0.0.1:{args.port}/")
     print(f"LAN URL: {store.configured_base_url()}/")
     print(f"Data directory: {store.data_dir}")

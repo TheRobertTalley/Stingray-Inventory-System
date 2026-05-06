@@ -7,7 +7,7 @@ set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
   echo.
-  echo Unable to uninstall Stingray Inventory Desktop. Exit code: %EXIT_CODE%
+  echo Unable to uninstall Inventory. Exit code: %EXIT_CODE%
   echo Press any key to close.
   pause >nul
 )

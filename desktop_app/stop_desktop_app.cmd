@@ -7,7 +7,7 @@ set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
   echo.
-  echo Unable to stop Stingray Inventory Desktop. Exit code: %EXIT_CODE%
+  echo Unable to stop Inventory. Exit code: %EXIT_CODE%
   echo Press any key to close.
   pause >nul
 )

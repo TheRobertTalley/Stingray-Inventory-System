@@ -217,7 +217,7 @@ jobs:
             "download_label": "Download installer (.zip)",
             "download_name": "StingrayInventoryDesktop-Installer.zip",
             "notes": [
-              "Extract the zip and run: Install Stingray Inventory Desktop.cmd",
+              "Extract the zip and run: Install Inventory.cmd",
               "Windows will prompt for Administrator approval (UAC).",
               "Installs as a SYSTEM startup task and restarts after crashes by default.",
               "Settings can turn Auto run and crash restart off on test PCs.",

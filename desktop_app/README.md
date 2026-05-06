@@ -1,6 +1,6 @@
-# Stingray Inventory Desktop (Windows)
+# Inventory Desktop (Windows)
 
-This desktop app runs the Stingray inventory system on a PC while keeping the same core data formats used on the ESP32/SD build.
+This desktop app runs the Inventory system on a PC while keeping the same core data formats used on the ESP32/SD build.
 
 ## Backward Compatibility
 
@@ -35,7 +35,11 @@ Default LAN behavior:
 
 Default data directory:
 
-- `C:\ProgramData\StingrayInventoryDesktop\data`
+- `C:\ProgramData\Inventory\data`
+
+Legacy data migration:
+
+- Existing installs from the older Stingray desktop build are detected and copied forward from `C:\ProgramData\StingrayInventoryDesktop\data` the first time the new app starts against an empty `Inventory` data tree.
 
 ## Using Existing SD Data
 
@@ -81,32 +85,34 @@ Manual install from built artifacts:
 One-click install from the generated ZIP:
 
 - Unzip `dist\StingrayInventoryDesktop-Installer.zip`
-- Double-click `Install Stingray Inventory Desktop.cmd`
+- Double-click `Install Inventory.cmd`
 - Approve the Windows UAC prompt
 
 You can override branding during install:
 
 ```powershell
-.\install_desktop_app.ps1 -BrandName "Stingray Airsoft" -BrandLogoPath "C:\Users\TALLEY\Pictures\stingray logo.png"
+.\install_desktop_app.ps1 -BrandName "Inventory" -BrandLogoPath "C:\Users\TALLEY\Pictures\stingray logo.png"
 ```
 
 By default, install creates:
 
-- Install directory: `C:\Program Files\StingrayInventoryDesktop`
-- Data directory: `C:\ProgramData\StingrayInventoryDesktop\data`
-- Start Menu shortcut: `Stingray Inventory Desktop`
-- Start Menu shortcut: `Stop Stingray Inventory Desktop`
-- Start Menu shortcut: `Uninstall Stingray Inventory Desktop`
-- Desktop shortcut: `Stingray Inventory Desktop`
-- SYSTEM startup task: `Stingray Inventory Desktop (System Startup)` (starts before login)
-- Windows Firewall rule: `Stingray Inventory Desktop LAN` for TCP port `8787` on Private and Public networks
+- Install directory: `C:\Program Files\Inventory`
+- Data directory: `C:\ProgramData\Inventory\data`
+- Logs directory: `C:\ProgramData\Inventory\logs`
+- Config directory: `C:\ProgramData\Inventory\config`
+- Start Menu shortcut: `Inventory`
+- Start Menu shortcut: `Stop Inventory`
+- Start Menu shortcut: `Uninstall Inventory`
+- Desktop shortcut: `Inventory`
+- SYSTEM startup task: `Inventory (System Startup)` (starts before login)
+- Windows Firewall rule: `Inventory LAN` for TCP port `8787` on Private and Public networks
 
 Important:
 
 - Installer auto-elevates and requests administrator approval using UAC.
 - The startup task runs as `SYSTEM` and keeps the app alive (auto restart on crash).
 - Settings includes an **Auto run and crash restart** checkbox for turning that startup task on or off.
-- Updates replace app files only. Inventory data remains in `C:\ProgramData\StingrayInventoryDesktop\data`.
+- Updates replace app files only. Inventory data remains in `C:\ProgramData\Inventory\data`.
 
 ## LAN / QR Setup
 
@@ -130,7 +136,7 @@ On the Settings page, use **Import ESP32 SD Data**:
 - Enter the SD card drive or copied SD folder path.
 - Preview first.
 - Choose merge or replace-after-backup.
-- Import always creates a backup first in `C:\ProgramData\StingrayInventoryDesktop\backups`.
+- Import always creates a backup first in `C:\ProgramData\Inventory\backups`.
 
 Supported SD files include `inventory.csv`, `transactions.csv`, `orders.json`, logs, config files, and `images/`.
 
@@ -140,7 +146,7 @@ On the Settings page:
 
 - **Backup Current Data** creates and downloads a ZIP backup.
 - **Import Backup ZIP** restores a ZIP backup.
-- Backup ZIPs are stored in `C:\ProgramData\StingrayInventoryDesktop\backups`.
+- Backup ZIPs are stored in `C:\ProgramData\Inventory\backups`.
 
 The app creates an automatic ZIP backup before SD import, backup restore, item delete, image removal, and image replacement.
 Portable backups do not include per-PC LAN settings, so restoring on another computer picks up that computer's network settings instead of the original one.
@@ -175,7 +181,7 @@ Installer zip output:
 
 Use either:
 
-- Start Menu: `Stop Stingray Inventory Desktop`
+- Start Menu: `Stop Inventory`
 - Or in the install folder: `stop_desktop_app.cmd`
 
 Default behavior:
@@ -194,7 +200,7 @@ To stop but keep autostart enabled:
 
 Use either:
 
-- Start Menu: `Uninstall Stingray Inventory Desktop`
+- Start Menu: `Uninstall Inventory`
 - Or in the install folder: `uninstall_desktop_app.cmd`
 
 Default behavior:
@@ -202,13 +208,15 @@ Default behavior:
 - Stops app
 - Removes startup task and shortcuts
 - Removes app files
-- Keeps data at `C:\ProgramData\StingrayInventoryDesktop\data`
+- Keeps data at `C:\ProgramData\Inventory\data`
 
 To also remove data:
 
 ```powershell
 .\uninstall_desktop_app.ps1 -RemoveData
 ```
+
+That purge removes the Inventory data, backups, logs, and config folders under `C:\ProgramData\Inventory` and the older `C:\ProgramData\StingrayInventoryDesktop` tree if it still exists.
 
 ## Smoke Test
 

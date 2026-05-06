@@ -1,14 +1,14 @@
 param(
   [string]$SourceDir = "",
-  [string]$InstallDir = "$env:ProgramFiles\\StingrayInventoryDesktop",
-  [string]$DataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data",
+  [string]$InstallDir = "$env:ProgramFiles\\Inventory",
+  [string]$DataDir = "$env:ProgramData\\Inventory\\data",
   [int]$Port = 8787,
-  [string]$BrandName = "Stingray Airsoft",
+  [string]$BrandName = "Inventory",
   [string]$BrandLogoPath = "",
   [switch]$NoDesktopShortcut,
   [switch]$NoAutoStart,
-  [string]$SystemTaskName = "Stingray Inventory Desktop (System Startup)",
-  [string]$FirewallRuleName = "Stingray Inventory Desktop LAN",
+  [string]$SystemTaskName = "Inventory (System Startup)",
+  [string]$FirewallRuleName = "Inventory LAN",
   [switch]$RunAfterInstall
 )
 
@@ -16,6 +16,8 @@ $ErrorActionPreference = "Stop"
 
 $cloudHeader = "provider|login_email|folder_name|folder_hint|mode|backup_mode|asset_mode|brand_name|brand_logo_ref|client_id|client_secret|updated_at"
 $defaultBrandLogoPath = "C:\\Users\\TALLEY\\Pictures\\stingray logo.png"
+$legacySystemTaskName = "Stingray Inventory Desktop (System Startup)"
+$legacyFirewallRuleName = "Stingray Inventory Desktop LAN"
 
 function Test-IsAdministrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -180,7 +182,14 @@ if ($runningApp) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $env:ProgramData "Inventory\\logs") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $env:ProgramData "Inventory\\config") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "images") | Out-Null
+
+$legacyDataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data"
+if ((-not (Test-Path (Join-Path $DataDir "inventory.csv"))) -and (Test-Path $legacyDataDir)) {
+  Copy-Item -Path (Join-Path $legacyDataDir "*") -Destination $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Path (Join-Path $SourceDir "*") -Destination $InstallDir -Recurse -Force
@@ -189,6 +198,10 @@ $existingFirewallRule = Get-NetFirewallRule -DisplayName $FirewallRuleName -Erro
 if ($existingFirewallRule) {
   Remove-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
 }
+$legacyFirewallRule = Get-NetFirewallRule -DisplayName $legacyFirewallRuleName -ErrorAction SilentlyContinue
+if ($legacyFirewallRule) {
+  Remove-NetFirewallRule -DisplayName $legacyFirewallRuleName -ErrorAction SilentlyContinue
+}
 New-NetFirewallRule `
   -DisplayName $FirewallRuleName `
   -Direction Inbound `
@@ -196,7 +209,7 @@ New-NetFirewallRule `
   -Protocol TCP `
   -LocalPort $Port `
   -Profile Private,Public `
-  -Description "Allow Stingray Inventory Desktop from devices on the local LAN, including Windows networks classified as Public." | Out-Null
+  -Description "Allow Inventory from devices on the local LAN, including Windows networks classified as Public." | Out-Null
 
 $mainPageUrl = "http://127.0.0.1:$Port/"
 $launcherPath = Join-Path $InstallDir "Run-StingrayDesktop.cmd"
@@ -263,60 +276,60 @@ if ($resolvedLogoPath) {
   [void](Convert-PngToIco -PngPath $savedLogoPath -IcoPath $iconPath)
 }
 
-$cloudConfigPath = Join-Path $DataDir "cloud_backup.cfg"
+$cloudConfigPath = Join-Path $env:ProgramData "Inventory\\config\\cloud_backup.cfg"
 Update-CloudBranding -CloudConfigPath $cloudConfigPath -NewBrandName $BrandName -NewBrandLogoRef $brandLogoRef
 
 $shortcutIcon = if (Test-Path $iconPath) { $iconPath } else { Join-Path $InstallDir "StingrayInventoryDesktop.exe" }
 
 $wsh = New-Object -ComObject WScript.Shell
-$startMenuDir = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Stingray Inventory Desktop"
+$startMenuDir = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Inventory"
 New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
 
-$startShortcutPath = Join-Path $startMenuDir "Stingray Inventory Desktop.lnk"
+$startShortcutPath = Join-Path $startMenuDir "Inventory.lnk"
 $startShortcut = $wsh.CreateShortcut($startShortcutPath)
 $startShortcut.TargetPath = $launcherPath
 $startShortcut.WorkingDirectory = $InstallDir
 $startShortcut.IconLocation = $shortcutIcon
-$startShortcut.Description = "Open Stingray Inventory main page"
+$startShortcut.Description = "Open Inventory main page"
 $startShortcut.Save()
 
-$manualShortcutPath = Join-Path $startMenuDir "Stingray Inventory Desktop (Manual Start).lnk"
+$manualShortcutPath = Join-Path $startMenuDir "Inventory (Manual Start).lnk"
 $manualShortcut = $wsh.CreateShortcut($manualShortcutPath)
 $manualShortcut.TargetPath = $launcherPath
 $manualShortcut.WorkingDirectory = $InstallDir
 $manualShortcut.IconLocation = $shortcutIcon
-$manualShortcut.Description = "Start Stingray Inventory desktop app and open browser"
+$manualShortcut.Description = "Start Inventory desktop app and open browser"
 $manualShortcut.Save()
 
 $powershellExe = Resolve-PowerShellExe
 
 $stopScriptPath = Join-Path $InstallDir "stop_desktop_app.ps1"
-$stopShortcutPath = Join-Path $startMenuDir "Stop Stingray Inventory Desktop.lnk"
+$stopShortcutPath = Join-Path $startMenuDir "Stop Inventory.lnk"
 $stopShortcut = $wsh.CreateShortcut($stopShortcutPath)
 $stopShortcut.TargetPath = $powershellExe
 $stopShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$stopScriptPath`" -SystemTaskName `"$SystemTaskName`""
 $stopShortcut.WorkingDirectory = $InstallDir
 $stopShortcut.IconLocation = $shortcutIcon
-$stopShortcut.Description = "Stop Stingray Inventory and disable startup task"
+$stopShortcut.Description = "Stop Inventory and disable startup task"
 $stopShortcut.Save()
 
 $uninstallScriptPath = Join-Path $InstallDir "uninstall_desktop_app.ps1"
-$uninstallShortcutPath = Join-Path $startMenuDir "Uninstall Stingray Inventory Desktop.lnk"
+$uninstallShortcutPath = Join-Path $startMenuDir "Uninstall Inventory.lnk"
 $uninstallShortcut = $wsh.CreateShortcut($uninstallShortcutPath)
 $uninstallShortcut.TargetPath = $powershellExe
 $uninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$uninstallScriptPath`" -InstallDir `"$InstallDir`" -DataDir `"$DataDir`" -SystemTaskName `"$SystemTaskName`" -FirewallRuleName `"$FirewallRuleName`""
 $uninstallShortcut.WorkingDirectory = $InstallDir
 $uninstallShortcut.IconLocation = $shortcutIcon
-$uninstallShortcut.Description = "Uninstall Stingray Inventory Desktop (keeps data by default)"
+$uninstallShortcut.Description = "Uninstall Inventory (keeps data by default)"
 $uninstallShortcut.Save()
 
-$desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Stingray Inventory Desktop.lnk"
+$desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Inventory.lnk"
 if (-not $NoDesktopShortcut) {
   $desktopShortcut = $wsh.CreateShortcut($desktopShortcutPath)
   $desktopShortcut.TargetPath = $launcherPath
   $desktopShortcut.WorkingDirectory = $InstallDir
   $desktopShortcut.IconLocation = $shortcutIcon
-  $desktopShortcut.Description = "Open Stingray Inventory main page"
+  $desktopShortcut.Description = "Open Inventory main page"
   $desktopShortcut.Save()
 }
 
@@ -330,10 +343,17 @@ foreach ($legacyPath in $legacyStartupShortcutPaths) {
   }
 }
 
+$legacyTask = Get-ScheduledTask -TaskName $legacySystemTaskName -ErrorAction SilentlyContinue
+if ($legacyTask) {
+  Unregister-ScheduledTask -TaskName $legacySystemTaskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+
 if ($NoAutoStart) {
-  $existingTask = Get-ScheduledTask -TaskName $SystemTaskName -ErrorAction SilentlyContinue
-  if ($existingTask) {
-    Unregister-ScheduledTask -TaskName $SystemTaskName -Confirm:$false
+  foreach ($taskName in @($SystemTaskName, $legacySystemTaskName)) {
+    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existingTask) {
+      Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
   }
 } else {
   & icacls $DataDir /grant "SYSTEM:(OI)(CI)(M)" "Users:(OI)(CI)(M)" /T /C | Out-Null
@@ -357,7 +377,7 @@ if ($NoAutoStart) {
     -Trigger $taskTrigger `
     -Principal $taskPrincipal `
     -Settings $taskSettings `
-    -Description "Keeps Stingray Inventory Desktop running before login and restarts after crashes." `
+    -Description "Keeps Inventory running before login and restarts after crashes." `
     -Force | Out-Null
 
   try {
@@ -370,7 +390,7 @@ if ($RunAfterInstall) {
   Start-Process -FilePath $launcherPath
 }
 
-Write-Host "Installed Stingray Inventory Desktop to: $InstallDir"
+Write-Host "Installed Inventory to: $InstallDir"
 Write-Host "Data directory: $DataDir"
 Write-Host "Brand name: $BrandName"
 if ($brandLogoRef) {

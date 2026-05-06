@@ -1,7 +1,7 @@
 param(
   [string]$HostIp = "0.0.0.0",
   [int]$Port = 8787,
-  [string]$DataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data"
+  [string]$DataDir = "$env:ProgramData\\Inventory\\data"
 )
 
 $ErrorActionPreference = "Stop"

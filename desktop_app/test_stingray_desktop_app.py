@@ -190,8 +190,11 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue((store.backups_dir / result["backup"]).exists())
         self.assertEqual(result["items_imported"], 1)
         status = client.get("/api/status").get_json()
+        self.assertEqual(status["app_name"], "Inventory")
         self.assertIn("network_url", status)
         self.assertIn("auto_run_enabled", status)
+        self.assertIn("firewall_rule_name", status)
+        self.assertIn("auto_run_task_name", status)
 
     def test_backup_zip_export_import_and_labels_page(self):
         client, store = self.make_client()
@@ -258,6 +261,44 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue(restore["ok"])
         self.assertEqual(status["selected_lan_ip"], "10.0.0.5")
         self.assertEqual(status["network_url"], "http://10.0.0.5:8787")
+
+    def test_legacy_programdata_tree_migrates_into_inventory_layout(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        programdata = Path(tmp.name) / "ProgramData"
+        legacy_data = programdata / "StingrayInventoryDesktop" / "data"
+        new_data = programdata / "Inventory" / "data"
+        legacy_data.mkdir(parents=True)
+        (legacy_data / "inventory.csv").write_text(
+            "part_number|category|part_name|qr_code|color|material|qty|image_ref|bom_product|bom_qty|updated_at\n"
+            "LEG1|part|Legacy Item|QR|||4|||0|2026\n",
+            encoding="utf-8",
+        )
+        (legacy_data / "desktop_config.json").write_text(
+            '{\n  "bind_host": "0.0.0.0",\n  "port": 8787,\n  "selected_lan_ip": "192.168.1.77",\n  "configured_network_base_url": "http://192.168.1.77:8787",\n  "updated_at": "2026-01-01T00:00:00Z"\n}\n',
+            encoding="utf-8",
+        )
+        (legacy_data / "cloud_backup.cfg").write_text(
+            "provider|login_email|folder_name|folder_hint|mode|backup_mode|asset_mode|brand_name|brand_logo_ref|client_id|client_secret|updated_at\n"
+            "google_drive||||select_or_create|sd_only|sd_only|Legacy Brand||||2026\n",
+            encoding="utf-8",
+        )
+
+        app, store = create_app(new_data, firmware_ino=Path(__file__).resolve().parents[1] / "firmware" / "StingrayInventoryESP32" / "StingrayInventoryESP32.ino", bind_host="0.0.0.0", port=8787)
+        client = app.test_client()
+
+        item = client.get("/api/item?id=LEG1").get_json()["item"]
+        status = client.get("/api/status").get_json()
+
+        self.assertEqual(item["qty"], 4)
+        self.assertEqual(status["selected_lan_ip"], "192.168.1.77")
+        self.assertEqual(status["data_dir"], str(new_data))
+        self.assertEqual(status["logs_dir"], str(store.logs_dir))
+        self.assertEqual(status["config_dir"], str(store.config_dir))
+        self.assertTrue((store.inventory_file).exists())
+        self.assertTrue((store.app_config_file).exists())
+        self.assertTrue((store.cloud_config_file).exists())
+        self.assertTrue((store.logs_dir / "device_log.csv").exists())
 
     def test_existing_ui_gets_desktop_settings_and_item_edit_controls(self):
         client, _ = self.make_client()

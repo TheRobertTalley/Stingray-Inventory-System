@@ -1,6 +1,6 @@
 param(
-  [string]$InstallDir = "$env:ProgramFiles\\StingrayInventoryDesktop",
-  [string]$SystemTaskName = "Stingray Inventory Desktop (System Startup)",
+  [string]$InstallDir = "$env:ProgramFiles\\Inventory",
+  [string]$SystemTaskName = "Inventory (System Startup)",
   [switch]$KeepAutoStart
 )
 
@@ -50,6 +50,20 @@ if ($task) {
   }
 }
 
+$legacyTaskName = "Stingray Inventory Desktop (System Startup)"
+if (-not $task) {
+  $legacyTask = Get-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue
+  if ($legacyTask) {
+    try {
+      Stop-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue
+    } catch {
+    }
+    if (-not $KeepAutoStart) {
+      Disable-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue | Out-Null
+    }
+  }
+}
+
 # Stop app processes.
 $appProcesses = Get-Process -Name "StingrayInventoryDesktop" -ErrorAction SilentlyContinue
 if ($appProcesses) {
@@ -68,7 +82,7 @@ foreach ($proc in ($psProcesses | Where-Object { $_.CommandLine -match $escapedS
 }
 
 if (-not $KeepAutoStart) {
-  Write-Host "Stingray Inventory stopped and startup task disabled."
+  Write-Host "Inventory stopped and startup task disabled."
 } else {
-  Write-Host "Stingray Inventory stopped. Startup task remains enabled."
+  Write-Host "Inventory stopped. Startup task remains enabled."
 }

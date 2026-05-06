@@ -1,8 +1,8 @@
 param(
-  [string]$InstallDir = "$env:ProgramFiles\\StingrayInventoryDesktop",
-  [string]$DataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data",
-  [string]$SystemTaskName = "Stingray Inventory Desktop (System Startup)",
-  [string]$FirewallRuleName = "Stingray Inventory Desktop LAN",
+  [string]$InstallDir = "$env:ProgramFiles\\Inventory",
+  [string]$DataDir = "$env:ProgramData\\Inventory\\data",
+  [string]$SystemTaskName = "Inventory (System Startup)",
+  [string]$FirewallRuleName = "Inventory LAN",
   [switch]$RemoveData
 )
 
@@ -47,38 +47,46 @@ $stopScript = Join-Path $InstallDir "stop_desktop_app.ps1"
 if (Test-Path $stopScript) {
   & $stopScript -InstallDir $InstallDir -SystemTaskName $SystemTaskName | Out-Null
 } else {
-  $task = Get-ScheduledTask -TaskName $SystemTaskName -ErrorAction SilentlyContinue
-  if ($task) {
-    try {
-      Stop-ScheduledTask -TaskName $SystemTaskName -ErrorAction SilentlyContinue
-    } catch {
+  foreach ($taskName in @($SystemTaskName, "Stingray Inventory Desktop (System Startup)")) {
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($task) {
+      try {
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+      } catch {
+      }
+      Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
     }
-    Disable-ScheduledTask -TaskName $SystemTaskName -ErrorAction SilentlyContinue | Out-Null
   }
   Get-Process -Name "StingrayInventoryDesktop" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-$taskToDelete = Get-ScheduledTask -TaskName $SystemTaskName -ErrorAction SilentlyContinue
-if ($taskToDelete) {
-  Unregister-ScheduledTask -TaskName $SystemTaskName -Confirm:$false -ErrorAction SilentlyContinue
+foreach ($taskName in @($SystemTaskName, "Stingray Inventory Desktop (System Startup)")) {
+  $taskToDelete = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if ($taskToDelete) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  }
 }
 
-$firewallRule = Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
-if ($firewallRule) {
-  Remove-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
+foreach ($ruleName in @($FirewallRuleName, "Stingray Inventory Desktop LAN")) {
+  $firewallRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+  if ($firewallRule) {
+    Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+  }
 }
 
-$startMenuDir = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Stingray Inventory Desktop"
+$startMenuDir = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Inventory"
 if (Test-Path $startMenuDir) {
   Remove-Item -LiteralPath $startMenuDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Stingray Inventory Desktop.lnk"
+$desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Inventory.lnk"
 if (Test-Path $desktopShortcutPath) {
   Remove-Item -LiteralPath $desktopShortcutPath -Force -ErrorAction SilentlyContinue
 }
 
 $legacyStartupShortcutPaths = @(
+  (Join-Path ([Environment]::GetFolderPath("Startup")) "Inventory Background.lnk"),
+  (Join-Path ([Environment]::GetFolderPath("CommonStartup")) "Inventory Background.lnk"),
   (Join-Path ([Environment]::GetFolderPath("Startup")) "Stingray Inventory Desktop Background.lnk"),
   (Join-Path ([Environment]::GetFolderPath("CommonStartup")) "Stingray Inventory Desktop Background.lnk")
 )
@@ -101,16 +109,27 @@ del /f /q "%~f0"
   Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$removeScriptPath`"" -WindowStyle Hidden
 }
 
-if ($RemoveData -and (Test-Path $DataDir)) {
-  Remove-Item -LiteralPath $DataDir -Recurse -Force -ErrorAction SilentlyContinue
-  $parentData = Split-Path -Parent $DataDir
-  if (Test-Path $parentData -and -not (Get-ChildItem -LiteralPath $parentData -Force -ErrorAction SilentlyContinue)) {
-    Remove-Item -LiteralPath $parentData -Force -ErrorAction SilentlyContinue
+if ($RemoveData) {
+  $inventoryRoot = Split-Path -Parent $DataDir
+  $legacyRoot = Join-Path (Split-Path -Parent $inventoryRoot) "StingrayInventoryDesktop"
+  foreach ($root in @($inventoryRoot, $legacyRoot)) {
+    if (-not (Test-Path $root)) {
+      continue
+    }
+    foreach ($childName in @("data", "backups", "logs", "config")) {
+      $childPath = Join-Path $root $childName
+      if (Test-Path $childPath) {
+        Remove-Item -LiteralPath $childPath -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+    if (-not (Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)) {
+      Remove-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
+    }
   }
 }
 
 if ($RemoveData) {
-  Write-Host "Stingray Inventory Desktop uninstalled. App files and data removed."
+  Write-Host "Inventory uninstalled. App files and data removed."
 } else {
-  Write-Host "Stingray Inventory Desktop uninstalled. Data kept at: $DataDir"
+  Write-Host "Inventory uninstalled. Data kept at: $DataDir"
 }

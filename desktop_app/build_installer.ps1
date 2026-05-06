@@ -1,8 +1,8 @@
 param(
-  [string]$InstallDir = "$env:ProgramFiles\\StingrayInventoryDesktop",
-  [string]$DataDir = "$env:ProgramData\\StingrayInventoryDesktop\\data",
+  [string]$InstallDir = "$env:ProgramFiles\\Inventory",
+  [string]$DataDir = "$env:ProgramData\\Inventory\\data",
   [int]$Port = 8787,
-  [string]$BrandName = "Stingray Airsoft",
+  [string]$BrandName = "Inventory",
   [string]$BrandLogoPath = "C:\\Users\\TALLEY\\Pictures\\stingray logo.png",
   [switch]$InstallNow
 )
@@ -141,11 +141,11 @@ if (Test-Path $bundleDir) { Remove-Item -Recurse -Force $bundleDir }
 New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
 Copy-Item -Path $appDistDir -Destination (Join-Path $bundleDir "StingrayInventoryDesktop") -Recurse -Force
 Copy-Item -Path (Join-Path $scriptDir "install_desktop_app.ps1") -Destination (Join-Path $bundleDir "install_desktop_app.ps1") -Force
-Copy-Item -Path (Join-Path $scriptDir "install_desktop_app.cmd") -Destination (Join-Path $bundleDir "Install Stingray Inventory Desktop.cmd") -Force
+Copy-Item -Path (Join-Path $scriptDir "install_desktop_app.cmd") -Destination (Join-Path $bundleDir "Install Inventory.cmd") -Force
 Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.ps1") -Destination (Join-Path $bundleDir "stop_desktop_app.ps1") -Force
 Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.ps1") -Destination (Join-Path $bundleDir "uninstall_desktop_app.ps1") -Force
-Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.cmd") -Destination (Join-Path $bundleDir "Stop Stingray Inventory Desktop.cmd") -Force
-Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.cmd") -Destination (Join-Path $bundleDir "Uninstall Stingray Inventory Desktop.cmd") -Force
+Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.cmd") -Destination (Join-Path $bundleDir "Stop Inventory.cmd") -Force
+Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.cmd") -Destination (Join-Path $bundleDir "Uninstall Inventory.cmd") -Force
 Copy-Item -Path (Join-Path $scriptDir "README.md") -Destination (Join-Path $bundleDir "README.md") -Force
 
 $zipPath = Join-Path $distDir "StingrayInventoryDesktop-Installer.zip"
