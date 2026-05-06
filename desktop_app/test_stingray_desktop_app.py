@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+import time
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
@@ -375,9 +376,24 @@ class DesktopAppTests(unittest.TestCase):
         self.assertIn("webkitdirectory", settings_html)
         self.assertIn("Choose Folder...", settings_html)
         self.assertIn("settings-nav-link", settings_html)
+        self.assertIn('id="desktop-import-link"', inventory_html)
+        self.assertIn("Import</button>", inventory_html)
+        self.assertIn("/settings#desktop-import-panel", inventory_html)
         self.assertIn("exactOpen(value)", inventory_html)
         self.assertIn("desktop-edit-panel", item_html)
         self.assertIn("manual-panel", item_html)
+
+    def test_launcher_opens_inventory_screen_by_default(self):
+        client, store = self.make_client()
+        store.app_config.setup_complete = True
+        with patch("stingray_desktop_app.probe_url", return_value=(True, "ok")), patch("stingray_desktop_app.webbrowser.open") as open_mock:
+            from stingray_desktop_app import open_browser_when_ready
+
+            open_browser_when_ready(store)
+            time.sleep(0.2)
+
+        open_mock.assert_called()
+        self.assertTrue(any(call.args and call.args[0].endswith("/") for call in open_mock.call_args_list))
 
     def test_folder_picker_upload_stages_and_imports_inventory_folder(self):
         client, store = self.make_client()

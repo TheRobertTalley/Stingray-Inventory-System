@@ -2004,7 +2004,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         </div>
         <pre id="desktop-run-status" class="cloud-status">Loading auto run status...</pre>
 
-        <h2>Import Inventory Folder</h2>
+        <h2 id="desktop-import-panel">Import Inventory Folder</h2>
         <p class="caption">Point this at a folder like <code>C:\\Users\\TALLEY\\Desktop\\old inventory</code>. Any folder containing <code>inventory.csv</code> works.</p>
         <div class="form-grid">
           <label class="span-2">
@@ -2601,6 +2601,21 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 
     def desktop_inventory_html() -> str:
         html = store.index_html
+        if 'id="desktop-import-link"' not in html and 'href="/settings"' in html:
+            replacements = [
+                (
+                    '<a id="settings-nav-link" class="nav-link" href="/settings">Settings</a>',
+                    '<a id="settings-nav-link" class="nav-link" href="/settings">Settings</a> <button id="desktop-import-link" type="button" class="nav-link">Import</button>',
+                ),
+                (
+                    '<a href="/settings">Settings</a>',
+                    '<a href="/settings">Settings</a> <button id="desktop-import-link" type="button" class="nav-link">Import</button>',
+                ),
+            ]
+            for old, new in replacements:
+                if old in html:
+                    html = html.replace(old, new, 1)
+                    break
         script = r'''
 <script>
 (function(){
@@ -2614,6 +2629,12 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     if (hit) window.location.href = `/item?id=${encodeURIComponent(hit.id)}`;
   }
   document.addEventListener('DOMContentLoaded', () => {
+    const importLink = document.getElementById('desktop-import-link');
+    if (importLink) {
+      importLink.addEventListener('click', () => {
+        window.location.href = '/settings#desktop-import-panel';
+      });
+    }
     const search = document.getElementById('search-input');
     if (!search) return;
     search.focus();
@@ -3472,8 +3493,8 @@ def run_self_test(app: Flask) -> None:
 
 
 def open_browser_when_ready(store: DesktopStore) -> None:
-    target_url = store.setup_page_url() if not store.app_config.setup_complete else store.settings_page_url()
-    fallback_url = f"{store.local_pc_url()}/setup" if not store.app_config.setup_complete else f"{store.local_pc_url()}/settings"
+    target_url = store.setup_page_url() if not store.app_config.setup_complete else f"{store.local_pc_url()}/"
+    fallback_url = f"{store.local_pc_url()}/setup" if not store.app_config.setup_complete else f"{store.local_pc_url()}/"
     lan_probe_url = f"{store.configured_base_url()}/api/status"
     local_probe_url = f"{store.local_pc_url()}/api/status"
 
