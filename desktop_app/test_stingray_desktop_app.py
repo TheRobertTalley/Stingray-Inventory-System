@@ -120,6 +120,61 @@ class DesktopAppTests(unittest.TestCase):
         imported = client.get("/api/item?id=NEST").get_json()["item"]
         self.assertEqual(imported["qty"], 6)
 
+    def test_inventory_folder_import_handles_desktop_legacy_folder(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        legacy_root = home / "Desktop" / "old inventory"
+        legacy_images = legacy_root / "images"
+        legacy_ui = legacy_root / "ui"
+        legacy_images.mkdir(parents=True, exist_ok=True)
+        legacy_ui.mkdir(parents=True, exist_ok=True)
+        (legacy_root / "inventory.csv").write_text(
+            "part_number|category|part_name|qr_code|color|material|qty|image_ref|bom_product|bom_qty|updated_at\n"
+            "DESK1|part|Desktop Item|QR|||7|/images/desktop.png||0|2026\n",
+            encoding="utf-8",
+        )
+        (legacy_root / "orders.json").write_text('{"orders":[{"order_number":"DESK-ORD","created_at":"2026","updated_at":"2026","lines":[]}]}', encoding="utf-8")
+        (legacy_root / "transactions.csv").write_text("timestamp|item_id|action|delta|qty_after|note\n2026|DESK1|import|7|7|desktop\n", encoding="utf-8")
+        (legacy_root / "device_log.csv").write_text("timestamp|mac_address|uptime_seconds|event|detail\n2026|PC|1|import|desktop\n", encoding="utf-8")
+        (legacy_root / "time_log.csv").write_text("timestamp|event|detail\n2026|import|desktop\n", encoding="utf-8")
+        (legacy_images / "desktop.png").write_bytes(b"desktop")
+        (legacy_ui / "index.html").write_text("<html>legacy ui</html>", encoding="utf-8")
+
+        with patch("stingray_desktop_app.Path.home", return_value=home):
+            client, store = self.make_client()
+            preview = client.get("/api/desktop/sd/preview", query_string={"path": str(legacy_root)}).get_json()
+            self.assertEqual(Path(preview["import_root"]), legacy_root)
+            self.assertEqual(preview["inventory_items_found"], 1)
+            self.assertIn("inventory.csv", preview["files_found"])
+
+            result = client.post("/api/desktop/sd/import", json={"path": str(legacy_root), "mode": "merge"}).get_json()
+            self.assertEqual(result["items_imported"], 1)
+            self.assertEqual(result["orders_added"], 1)
+            self.assertTrue((store.images_dir / "desktop.png").exists())
+            imported = client.get("/api/item?id=DESK1").get_json()["item"]
+            self.assertEqual(imported["qty"], 7)
+
+    def test_import_suggestions_detect_desktop_old_inventory_folder(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        legacy_root = home / "Desktop" / "old inventory"
+        (legacy_root / "images").mkdir(parents=True, exist_ok=True)
+        (legacy_root / "inventory.csv").write_text(
+            "part_number|category|part_name|qr_code|color|material|qty|image_ref|bom_product|bom_qty|updated_at\n"
+            "SUG1|part|Suggested Item|QR|||1|||0|2026\n",
+            encoding="utf-8",
+        )
+
+        with patch("stingray_desktop_app.Path.home", return_value=home):
+            client, _ = self.make_client()
+            suggestions = client.get("/api/desktop/import/suggestions").get_json()
+
+        self.assertGreaterEqual(len(suggestions["suggestions"]), 1)
+        self.assertEqual(Path(suggestions["suggestions"][0]["path"]), legacy_root)
+        self.assertIn("old inventory", suggestions["suggestions"][0]["label"].lower())
+
     def test_sd_merge_imports_orders_and_appends_logs(self):
         client, store = self.make_client()
         store._save_orders_payload(

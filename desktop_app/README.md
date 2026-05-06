@@ -139,16 +139,17 @@ TP-Link checks if phones cannot connect:
 - AP/client isolation must be off.
 - Windows Firewall rule must exist for TCP `8787` on the active network profile.
 
-## SD Card Import
+## Inventory Folder Import
 
-After unlocking admin settings, use **Import ESP32 SD Data**:
+After unlocking admin settings, use **Import Inventory Folder**:
 
-- Enter the SD card drive or copied SD folder path.
+- Enter a copied inventory folder path, such as `C:\Users\TALLEY\Desktop\old inventory`.
+- You can also point it at a copied SD-style folder from an older Stingray export.
 - Preview first.
 - Choose merge or replace-after-backup.
 - Import always creates a backup first in `C:\ProgramData\Inventory\backups`.
 
-Supported SD files include `inventory.csv`, `transactions.csv`, `orders.json`, logs, config files, and `images/`.
+Supported files include `inventory.csv`, `transactions.csv`, `orders.json`, logs, config files, and `images/`.
 
 ## Backup ZIP Export / Import
 

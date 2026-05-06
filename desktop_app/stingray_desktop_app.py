@@ -1285,6 +1285,45 @@ class DesktopStore:
         messages.append(f"Using detected SD data folder: {root}")
         return root, messages
 
+    def inventory_import_suggestions(self) -> list[dict[str, Any]]:
+        suggestions: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        search_roots = [
+            ("Desktop", Path.home() / "Desktop"),
+            ("Downloads", Path.home() / "Downloads"),
+            ("Documents", Path.home() / "Documents"),
+        ]
+
+        for location_label, root in search_roots:
+            if not root.exists() or not root.is_dir():
+                continue
+            try:
+                for child in root.iterdir():
+                    if not child.is_dir():
+                        continue
+                    resolved = str(child.resolve())
+                    if resolved in seen:
+                        continue
+                    score = self._sd_candidate_score(child)
+                    if score[0] <= 0 and score[1] <= 0 and score[2] <= 0:
+                        continue
+                    seen.add(resolved)
+                    files_found = self._sd_files_found(child)
+                    suggestions.append(
+                        {
+                            "label": f"{location_label} \\ {child.name}",
+                            "path": str(child),
+                            "inventory_items_found": score[0],
+                            "images_found": score[2],
+                            "files_found": files_found,
+                        }
+                    )
+            except OSError:
+                continue
+
+        suggestions.sort(key=lambda entry: (entry["inventory_items_found"], entry["images_found"], len(entry["files_found"])), reverse=True)
+        return suggestions[:5]
+
     def preview_sd_import(self, folder: Path) -> dict[str, Any]:
         requested_folder = folder
         folder, messages = self.resolve_sd_import_root(folder)
@@ -1824,11 +1863,12 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         </div>
         <pre id="desktop-run-status" class="cloud-status">Loading auto run status...</pre>
 
-        <h2>Import ESP32 SD Data</h2>
+        <h2>Import Inventory Folder</h2>
+        <p class="caption">Point this at a folder like <code>C:\\Users\\TALLEY\\Desktop\\old inventory</code>. Any folder containing <code>inventory.csv</code> works.</p>
         <div class="form-grid">
           <label class="span-2">
-            SD card or copied SD folder
-            <input id="desktop-sd-path" type="text" placeholder="D:\ or C:\Path\To\SDCopy">
+            Inventory folder path
+            <input id="desktop-sd-path" type="text" placeholder="C:\\Users\\TALLEY\\Desktop\\old inventory">
           </label>
           <label>
             Import mode
@@ -1843,8 +1883,9 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           <button id="desktop-backup-btn" type="button">Backup Current Data</button>
           <input id="desktop-backup-file" type="file" accept=".zip">
           <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
-          <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview SD Import</button>
-          <button id="desktop-import-sd-btn" type="button" class="secondary">Import SD Data</button>
+          <button id="desktop-use-old-inventory-btn" type="button" class="secondary">Use Desktop old inventory</button>
+          <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview Folder Import</button>
+          <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
         </div>
         <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
       </section>
@@ -1858,6 +1899,8 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 <script>
 (function(){
   const $ = (id) => document.getElementById(id);
+  const useOldInventoryBtn = $('desktop-use-old-inventory-btn');
+  let importSuggestions = [];
   async function json(url, options) {
     const response = await fetch(url, options || {});
     const data = await response.json().catch(() => ({}));
@@ -2040,6 +2083,25 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     if (!response.ok) throw new Error(data.error || `Import failed (${response.status})`);
     $('desktop-import-status').textContent = JSON.stringify(data, null, 2);
   }
+  async function loadImportSuggestions() {
+    const response = await json('/api/desktop/import/suggestions');
+    const suggestions = Array.isArray(response.suggestions) ? response.suggestions : [];
+    importSuggestions = suggestions;
+    if ($('desktop-sd-path')) {
+      const current = $('desktop-sd-path').value.trim();
+      if (!current) {
+        $('desktop-sd-path').value = (suggestions[0] && suggestions[0].path) || response.default_path || '';
+      }
+    }
+    if (useOldInventoryBtn) {
+      useOldInventoryBtn.hidden = suggestions.length === 0;
+      useOldInventoryBtn.textContent = suggestions.length ? `Use ${suggestions[0].label}` : 'Use Detected Desktop Folder';
+    }
+    if ($('desktop-import-status') && suggestions.length && $('desktop-import-status').textContent === 'Import ready.') {
+      $('desktop-import-status').textContent = `Detected import folder: ${suggestions[0].label}`;
+    }
+    return suggestions;
+  }
   document.addEventListener('DOMContentLoaded', () => {
     if (!$('desktop-health-panel')) return;
     $('desktop-save-network-btn').addEventListener('click', saveNetwork);
@@ -2055,10 +2117,31 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     $('desktop-restart-btn').addEventListener('click', () => system('restart'));
     $('desktop-stop-btn').addEventListener('click', () => system('stop'));
     $('desktop-stop-disable-btn').addEventListener('click', () => system('stop_disable_auto'));
+    if (useOldInventoryBtn) {
+      useOldInventoryBtn.addEventListener('click', async () => {
+        try {
+          const suggestions = importSuggestions.length ? importSuggestions : await loadImportSuggestions();
+          if (suggestions.length && $('desktop-sd-path')) {
+            $('desktop-sd-path').value = suggestions[0].path || '';
+            $('desktop-import-status').textContent = `Using ${suggestions[0].label}. Preview the folder before importing.`;
+          } else {
+            $('desktop-import-status').textContent = 'No likely inventory folder was detected on this PC.';
+          }
+        } catch (error) {
+          $('desktop-import-status').textContent = error.message;
+        }
+      });
+    }
     $('desktop-preview-sd-btn').addEventListener('click', previewSd);
     $('desktop-import-sd-btn').addEventListener('click', importSd);
     $('desktop-backup-btn').addEventListener('click', backup);
     $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => $('desktop-import-status').textContent = e.message));
+    loadImportSuggestions().catch((error) => {
+      if (useOldInventoryBtn) useOldInventoryBtn.hidden = true;
+      if ($('desktop-import-status') && $('desktop-import-status').textContent === 'Import ready.') {
+        $('desktop-import-status').textContent = error.message;
+      }
+    });
     refreshStatus();
   });
 })();
@@ -2397,6 +2480,13 @@ document.getElementById('category').addEventListener('change',load);document.get
             return jsonify(store.preview_sd_import(folder))
         except ValueError as exc:
             return json_error(400, str(exc))
+
+    @app.route("/api/desktop/import/suggestions", methods=["GET"])
+    def handle_desktop_import_suggestions():
+        return jsonify({
+            "suggestions": store.inventory_import_suggestions(),
+            "default_path": str(Path.home() / "Desktop" / "old inventory"),
+        })
 
     @app.route("/api/desktop/sd/import", methods=["POST"])
     def handle_desktop_sd_import():
