@@ -311,10 +311,22 @@ class DesktopAppTests(unittest.TestCase):
         inventory_html = client.get("/").get_data(as_text=True)
         item_html = client.get("/item?id=UI1").get_data(as_text=True)
         self.assertIn("desktop-lan-ip", settings_html)
+        self.assertIn("Ethernet uplinks are fine", settings_html)
+        self.assertNotIn("Nearby Networks", settings_html)
+        self.assertNotIn("scan networks", settings_html.lower())
         self.assertIn("settings-nav-link", settings_html)
         self.assertIn("exactOpen(value)", inventory_html)
         self.assertIn("desktop-edit-panel", item_html)
         self.assertIn("manual-panel", item_html)
+
+    def test_desktop_status_reports_lan_transport_not_wifi(self):
+        client, _ = self.make_client()
+        status = client.get("/api/status").get_json()
+        self.assertEqual(status["network_transport"], "LAN/Ethernet")
+        self.assertIn("lan_connected", status)
+        self.assertIn("lan_ip", status)
+        self.assertNotIn("wifi_connected", status)
+        self.assertNotIn("wifi_ssid", status)
 
     def test_settings_autorun_toggle_and_system_api(self):
         client, _ = self.make_client()

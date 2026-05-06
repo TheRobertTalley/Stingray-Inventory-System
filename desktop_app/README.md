@@ -31,6 +31,7 @@ Default LAN behavior:
 
 - The desktop app listens on `0.0.0.0:8787`.
 - The Settings page shows the LAN URL, for example `http://192.168.1.50:8787`.
+- Ethernet or any normal LAN connection is fine. There is no Wi-Fi scanning workflow on the Windows desktop build.
 - QR links and CSV exports use the configured LAN base URL, not `localhost`.
 
 Default data directory:
@@ -133,9 +134,9 @@ Important:
 
 TP-Link checks if phones cannot connect:
 
-- Phone must be on the same WiFi.
-- Guest WiFi isolation must be off.
-- TP-Link AP/client isolation must be off.
+- Phone or tablet must be on the same LAN.
+- Guest isolation must be off.
+- AP/client isolation must be off.
 - Windows Firewall rule must exist for TCP `8787` on the active network profile.
 
 ## SD Card Import

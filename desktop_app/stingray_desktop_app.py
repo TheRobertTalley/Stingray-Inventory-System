@@ -157,12 +157,6 @@ class GoogleState:
     last_error: str = ""
 
 
-@dataclass
-class WifiConfig:
-    ssid: str = ""
-    updated_at: str = ""
-
-
 def trim_copy(value: str) -> str:
     return (value or "").strip()
 
@@ -595,7 +589,6 @@ class DesktopStore:
         self.items: list[ItemRecord] = []
         self.cloud_config = CloudConfig()
         self.google_state = GoogleState()
-        self.wifi_config = WifiConfig()
         self.app_config = DesktopConfig(bind_host=bind_host, port=port)
         self.index_html, self.item_html = self._load_ui_assets(firmware_ino)
         self._ensure_data_files()
@@ -1499,31 +1492,28 @@ class DesktopStore:
             "folder_id": self.google_state.folder_id,
             "last_sync_at": self.google_state.last_sync_at,
             "time_source": "system_clock",
-            "wifi_connected": True,
-            "wifi_ssid": "desktop",
-            "wifi_ip": self.app_config.selected_lan_ip or (lan_ips[0] if lan_ips else "127.0.0.1"),
-            "wifi_rssi": 0,
-            "wifi_mode": "desktop",
-            "wifi_ap_active": False,
-            "wifi_ap_ssid": "",
-            "wifi_ap_clients": 0,
-            "wifi_config_source": "desktop",
-            "wifi_saved_ssid": self.wifi_config.ssid,
-            "wifi_setup_required": False,
-            "wifi_last_error": "",
+            "network_transport": "LAN/Ethernet",
+            "lan_connected": True,
+            "lan_ip": self.app_config.selected_lan_ip or (lan_ips[0] if lan_ips else "127.0.0.1"),
+            "lan_mode": "desktop",
+            "lan_gateway": "",
+            "lan_dns": [],
+            "lan_speed": "",
+            "lan_last_error": "",
         }
         payload.update(self.sd_status_fields())
         return payload
 
     def wifi_config_json(self) -> dict[str, Any]:
-        payload = {
+        lan_ip = self.app_config.selected_lan_ip or (detect_lan_ips()[0] if detect_lan_ips() else "127.0.0.1")
+        return {
             "config_source": "desktop",
-            "saved_ssid": self.wifi_config.ssid,
-            "saved_updated_at": self.wifi_config.updated_at,
-            "effective_ssid": self.wifi_config.ssid,
+            "saved_ssid": lan_ip,
+            "saved_updated_at": self.app_config.updated_at,
+            "effective_ssid": lan_ip,
             "connected": True,
-            "current_ssid": "desktop",
-            "current_ip": socket.gethostbyname(socket.gethostname()) if socket.gethostname() else "127.0.0.1",
+            "current_ssid": "desktop-lan",
+            "current_ip": lan_ip,
             "current_rssi": 0,
             "wifi_status": "connected",
             "wifi_mode": "desktop",
@@ -1534,7 +1524,6 @@ class DesktopStore:
             "last_error": "",
             "setup_required": False,
         }
-        return payload
 
     def cloud_config_json(self) -> dict[str, Any]:
         payload = asdict(self.cloud_config)
@@ -1595,6 +1584,62 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 
     def desktop_settings_html(setup_mode: bool = False) -> str:
         html = store.index_html
+        html = html.replace("<h2>Wi-Fi Setup</h2>", "<h2>Desktop LAN Access</h2>")
+        html = html.replace(
+            '<p id="wifi-caption" class="caption">Scan nearby networks, save Wi-Fi credentials on the device, and connect without reflashing firmware.</p>',
+            '<p id="wifi-caption" class="caption">Use this PC on the LAN or Ethernet. QR codes use the configured LAN URL.</p>',
+        )
+        html = html.replace("<span>Nearby Networks</span>", "<span>Detected LAN IPs</span>")
+        html = html.replace('value="">Choose a scanned network', 'value="">Choose a LAN IP')
+        html = html.replace('value="__manual__">Enter network manually / hidden SSID', 'value="__manual__">Enter LAN URL manually')
+        html = html.replace('Scan Networks', 'Refresh LAN IPs')
+        html = html.replace('Network Name (SSID)', 'Selected LAN IP')
+        html = html.replace('Choose a network or type one manually', 'Choose a LAN IP or type one manually')
+        html = html.replace('Leave blank for open networks', 'http://192.168.1.50:8787')
+        html = html.replace('Save And Connect Wi-Fi', 'Save LAN URL')
+        html = html.replace('Forget Saved Wi-Fi', 'Reset LAN URL')
+        html = html.replace('Loading Wi-Fi status...', 'Loading LAN status...')
+        html = html.replace('Wi-Fi: ', 'LAN/Ethernet: ')
+        html = html.replace(
+            "Saved Wi-Fi settings updated at ${safeConfig.saved_updated_at}. Scan nearby networks, or type a hidden SSID manually.",
+            "Saved LAN settings updated at ${safeConfig.saved_updated_at}. Select a LAN IP or type one manually.",
+        )
+        html = html.replace(
+            "Scan nearby networks, save Wi-Fi credentials on the device, and connect without reflashing firmware.",
+            "Use the LAN or Ethernet connection on this PC. Select a LAN IP and keep the QR/base URL aligned with it.",
+        )
+        html = html.replace(
+            "Choose a scanned network",
+            "Choose a LAN IP",
+        )
+        html = html.replace(
+            "No scanned networks yet",
+            "No LAN IPs detected yet",
+        )
+        html = html.replace(
+            "Enter network manually / hidden SSID",
+            "Enter LAN URL manually",
+        )
+        html = html.replace(
+            "Found 0 Wi-Fi network(s). Keep AP enabled, confirm a 2.4 GHz SSID is nearby, then scan again.",
+            "Found 0 LAN IPs. Check the network connection, then refresh again.",
+        )
+        html = html.replace(
+            "Found ${networks.length} Wi-Fi network(s).",
+            "Found ${networks.length} LAN IP(s).",
+        )
+        html = html.replace(
+            "Saved Wi-Fi settings cleared from this device.",
+            "Saved LAN settings cleared from this device.",
+        )
+        html = html.replace(
+            "Wi-Fi connected to ${data.current_ssid || data.saved_ssid || 'the selected network'}. Reconnect on ${data.current_ip || 'the new network address'} after AP shutdown.",
+            "LAN connection using ${data.current_ssid || data.saved_ssid || 'the selected network'}. Reconnect on ${data.current_ip || 'the selected network address'} after the refresh.",
+        )
+        html = html.replace(
+            "Wi-Fi settings saved for ${data.saved_ssid || 'the selected network'}, but the device stayed in AP mode. Check the password or signal and try again.",
+            "LAN settings saved for ${data.saved_ssid || 'the selected network'}, but the connection did not update. Check the IP or URL and try again.",
+        )
         wizard_visible = setup_mode or not store.app_config.setup_complete
         wizard_hidden = "" if wizard_visible else " hidden"
         admin_locked = not store.admin_unlocked()
@@ -1713,7 +1758,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 
       <section class="info-panel" id="desktop-lan-panel">
         <h2>Desktop LAN Access</h2>
-        <p class="caption">Use this URL from phones and tablets on the same Wi-Fi/LAN. QR codes use this LAN URL.</p>
+        <p class="caption">Use this URL from phones and tablets on the same LAN. Ethernet uplinks are fine. QR codes use this LAN URL.</p>
         <div class="form-grid">
           <label>
             Local PC URL
@@ -1846,7 +1891,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       `Another device should open: ${s.network_url}`,
       s.qr_loopback_warning ? 'Warning: QR codes point to localhost. Phones will not be able to open them.' : '',
       '',
-      'Router checks: same Wi-Fi, guest isolation off, AP/client isolation off.'
+      'LAN / Ethernet checks: same subnet or routed access, firewall allows TCP 8787.'
     ].filter(Boolean).join('\n');
   }
   function applyHealth(h) {
@@ -2412,17 +2457,24 @@ document.getElementById('category').addEventListener('change',load);document.get
     @app.route("/api/wifi/config", methods=["POST"])
     def handle_save_wifi_config():
         ssid = trim_copy(arg("ssid"))
-        store.wifi_config.ssid = sanitize_field(ssid)
-        store.wifi_config.updated_at = current_timestamp()
+        selected_ip = sanitize_field(ssid)
+        with store.lock:
+            if selected_ip:
+                store.app_config.selected_lan_ip = selected_ip
+                store.app_config.configured_network_base_url = f"http://{selected_ip}:{store.app_config.port}"
+                store._save_app_config()
         return jsonify(store.wifi_config_json())
 
     @app.route("/api/wifi/scan", methods=["GET"])
     def handle_wifi_scan():
-        return jsonify({"networks": [], "current_ssid": "", "scan_attempts": 1})
+        return jsonify({"networks": [], "current_ssid": store.app_config.selected_lan_ip or "", "scan_attempts": 1})
 
     @app.route("/api/wifi/forget", methods=["POST"])
     def handle_wifi_forget():
-        store.wifi_config = WifiConfig()
+        with store.lock:
+            store.app_config.selected_lan_ip = default_lan_ip()
+            store.app_config.configured_network_base_url = f"http://{store.app_config.selected_lan_ip}:{store.app_config.port}"
+            store._save_app_config()
         return jsonify(store.wifi_config_json())
 
     @app.route("/api/cloud-config", methods=["GET"])
