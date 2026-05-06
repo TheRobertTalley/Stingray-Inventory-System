@@ -2065,7 +2065,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || data.message || `Request failed (${response.status})`);
     return data;
-  }}
+  }
   async function post(url, body) {
     return json(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
   }
@@ -2654,7 +2654,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     const importLink = document.getElementById('desktop-import-link');
     if (importLink) {
       importLink.addEventListener('click', () => {
-        window.location.href = '/settings?view=import';
+        window.location.href = '/import-folder';
       });
     }
     const search = document.getElementById('search-input');
@@ -2683,29 +2683,38 @@ document.getElementById('category').addEventListener('change',load);document.get
     def desktop_import_html() -> str:
         html = desktop_settings_html(setup_mode=not store.app_config.setup_complete)
         html = html.replace('<title>Inventory</title>', '<title>Import Inventory Folder</title>', 1)
+        for section_id in (
+            "inventory-actions-section",
+            "inventory-tools-section",
+            "orders-section",
+            "order-detail-section",
+            "order-fulfill-section",
+            "settings-section",
+            "inventory-table-section",
+            "desktop-setup-wizard",
+            "desktop-health-panel",
+            "desktop-lan-panel",
+            "desktop-admin-access-panel",
+            "desktop-admin-shell",
+        ):
+            html = re.sub(
+                rf'(<section\b[^>]*id="{re.escape(section_id)}"[^>]*)(>)',
+                lambda match: f"{match.group(1)} hidden{match.group(2)}" if "hidden" not in match.group(1) else match.group(0),
+                html,
+                count=1,
+                flags=re.S,
+            )
         html = html.replace(
-            '<section class="info-panel" id="desktop-health-panel">',
-            '<section class="info-panel" id="desktop-health-panel" hidden>',
-            1,
-        )
-        html = html.replace(
-            '<section class="info-panel" id="desktop-lan-panel">',
-            '<section class="info-panel" id="desktop-lan-panel" hidden>',
-            1,
-        )
-        html = html.replace(
-            '<section class="info-panel" id="desktop-admin-access-panel">',
-            '<section class="info-panel" id="desktop-admin-access-panel" hidden>',
-            1,
-        )
-        html = html.replace(
-            '<section class="info-panel desktop-admin-shell" id="desktop-admin-shell"',
-            '<section class="info-panel desktop-admin-shell" id="desktop-admin-shell" hidden',
-            1,
-        )
-        html = html.replace(
-            '<section class="info-panel desktop-wizard" id="desktop-setup-wizard"',
-            '<section class="info-panel desktop-wizard" id="desktop-setup-wizard" hidden',
+            '</body>',
+            """<script>
+window.addEventListener('load', () => {
+  const panel = document.getElementById('desktop-import-panel');
+  if (panel) {
+    panel.scrollIntoView({block: 'start', behavior: 'auto'});
+  }
+});
+</script>
+</body>""",
             1,
         )
         return html
@@ -2713,6 +2722,7 @@ document.getElementById('category').addEventListener('change',load);document.get
     @app.route("/", methods=["GET"])
     @app.route("/settings", methods=["GET"])
     @app.route("/import", methods=["GET"])
+    @app.route("/import-folder", methods=["GET"])
     @app.route("/setup", methods=["GET"])
     @app.route("/orders", methods=["GET"])
     @app.route("/orders/view", methods=["GET"])
@@ -2724,7 +2734,7 @@ document.getElementById('category').addEventListener('change',load);document.get
             if arg("view") == "import":
                 return Response(desktop_import_html(), mimetype="text/html; charset=utf-8")
             return Response(desktop_settings_html(setup_mode=not store.app_config.setup_complete), mimetype="text/html; charset=utf-8")
-        if request.path == "/import":
+        if request.path in ("/import", "/import-folder"):
             return Response(desktop_import_html(), mimetype="text/html; charset=utf-8")
         if request.path == "/":
             return Response(desktop_inventory_html(), mimetype="text/html; charset=utf-8")
