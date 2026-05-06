@@ -2601,21 +2601,41 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 
     def desktop_inventory_html() -> str:
         html = store.index_html
-        if 'id="desktop-import-link"' not in html and 'href="/settings"' in html:
-            replacements = [
-                (
-                    '<a id="settings-nav-link" class="nav-link" href="/settings">Settings</a>',
-                    '<a id="settings-nav-link" class="nav-link" href="/settings">Settings</a> <button id="desktop-import-link" type="button" class="nav-link">Import</button>',
-                ),
-                (
-                    '<a href="/settings">Settings</a>',
-                    '<a href="/settings">Settings</a> <button id="desktop-import-link" type="button" class="nav-link">Import</button>',
-                ),
-            ]
-            for old, new in replacements:
-                if old in html:
-                    html = html.replace(old, new, 1)
-                    break
+        html = html.replace(
+            '<a id="settings-nav-link" class="nav-link" href="/settings">Settings</a> <button id="desktop-import-link" type="button" class="nav-link">Import</button>',
+            '<a id="settings-nav-link" class="nav-link" href="/settings">Settings</a>',
+            1,
+        )
+        html = html.replace(
+            """        <div>
+          <div class="small">CSV exports</div>
+          <div class="export-strip">
+            <button id="refresh-btn" type="button">Refresh Inventory</button>
+            <button class="secondary" type="button" data-export="all">Export All</button>
+            <button class="secondary" type="button" data-export="part">Export Parts</button>
+            <button class="secondary" type="button" data-export="product">Export Products</button>
+            <button class="secondary" type="button" data-export="kit">Export Kits</button>
+          </div>
+        </div>""",
+            """        <div>
+          <div class="small">CSV exports</div>
+          <div class="export-strip">
+            <button id="refresh-btn" type="button">Refresh Inventory</button>
+            <button class="secondary" type="button" data-export="all">Export All</button>
+            <button class="secondary" type="button" data-export="part">Export Parts</button>
+            <button class="secondary" type="button" data-export="product">Export Products</button>
+            <button class="secondary" type="button" data-export="kit">Export Kits</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="small">Imports</div>
+          <div class="export-strip">
+            <button id="desktop-import-link" type="button" class="secondary">Import Inventory Folder</button>
+          </div>
+        </div>""",
+            1,
+        )
         script = r'''
 <script>
 (function(){
