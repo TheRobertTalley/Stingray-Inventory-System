@@ -376,6 +376,8 @@ class DesktopAppTests(unittest.TestCase):
         self.assertIn("webkitdirectory", settings_html)
         self.assertIn("Choose Folder...", settings_html)
         self.assertIn("settings-nav-link", settings_html)
+        self.assertIn('</section>\n\n      <section class="info-panel" id="desktop-import-panel">', settings_html)
+        self.assertLess(settings_html.index('desktop-import-panel'), settings_html.index('desktop-lan-panel'))
         self.assertIn("Views And Tools", inventory_html)
         self.assertIn("Imports", inventory_html)
         self.assertIn('id="desktop-import-link"', inventory_html)

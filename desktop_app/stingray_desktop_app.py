@@ -1936,6 +1936,43 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         <pre id="desktop-health-status" class="cloud-status">Loading desktop health...</pre>
       </section>
 
+      <section class="info-panel" id="desktop-import-panel">
+        <h2>Import Inventory Folder</h2>
+        <p class="caption">Point this at a folder like <code>C:\\Users\\TALLEY\\Desktop\\old inventory</code>. Any folder containing <code>inventory.csv</code> works.</p>
+        <div class="form-grid">
+          <label class="span-2">
+            Inventory folder path
+            <input id="desktop-sd-path" type="text" placeholder="C:\\Users\\TALLEY\\Desktop\\old inventory">
+          </label>
+          <label>
+            Import mode
+            <select id="desktop-sd-mode">
+              <option value="merge">Merge into current inventory</option>
+              <option value="backup_replace">Backup current data then replace</option>
+              <option value="replace">Replace current inventory</option>
+            </select>
+          </label>
+        </div>
+        <div class="desktop-folder-tools">
+          <input id="desktop-folder-picker" type="file" webkitdirectory directory multiple hidden>
+          <button id="desktop-folder-picker-btn" type="button" class="secondary">Choose Folder...</button>
+          <button id="desktop-folder-clear-btn" type="button" class="secondary" hidden>Clear Selected Folder</button>
+        </div>
+        <div id="desktop-folder-dropzone" class="desktop-dropzone" tabindex="0" role="button" aria-label="Drop an inventory folder here">
+          Drop an inventory folder here, or choose one above.
+        </div>
+        <pre id="desktop-folder-summary" class="cloud-status">No folder selected.</pre>
+        <div class="cloud-actions">
+          <button id="desktop-backup-btn" type="button">Backup Current Data</button>
+          <input id="desktop-backup-file" type="file" accept=".zip">
+          <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
+          <button id="desktop-use-old-inventory-btn" type="button" class="secondary">Use Desktop old inventory</button>
+          <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview Folder Import</button>
+          <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
+        </div>
+        <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
+      </section>
+
       <section class="info-panel" id="desktop-lan-panel">
         <h2>Desktop LAN Access</h2>
         <p class="caption">Use this URL from phones and tablets on the same LAN. Ethernet uplinks are fine. QR codes use this LAN URL.</p>
@@ -2003,41 +2040,6 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           <button id="desktop-stop-disable-btn" type="button" class="secondary">Stop App And Disable Auto Run</button>
         </div>
         <pre id="desktop-run-status" class="cloud-status">Loading auto run status...</pre>
-
-        <h2 id="desktop-import-panel">Import Inventory Folder</h2>
-        <p class="caption">Point this at a folder like <code>C:\\Users\\TALLEY\\Desktop\\old inventory</code>. Any folder containing <code>inventory.csv</code> works.</p>
-        <div class="form-grid">
-          <label class="span-2">
-            Inventory folder path
-            <input id="desktop-sd-path" type="text" placeholder="C:\\Users\\TALLEY\\Desktop\\old inventory">
-          </label>
-          <label>
-            Import mode
-            <select id="desktop-sd-mode">
-              <option value="merge">Merge into current inventory</option>
-              <option value="backup_replace">Backup current data then replace</option>
-              <option value="replace">Replace current inventory</option>
-            </select>
-          </label>
-        </div>
-        <div class="desktop-folder-tools">
-          <input id="desktop-folder-picker" type="file" webkitdirectory directory multiple hidden>
-          <button id="desktop-folder-picker-btn" type="button" class="secondary">Choose Folder...</button>
-          <button id="desktop-folder-clear-btn" type="button" class="secondary" hidden>Clear Selected Folder</button>
-        </div>
-        <div id="desktop-folder-dropzone" class="desktop-dropzone" tabindex="0" role="button" aria-label="Drop an inventory folder here">
-          Drop an inventory folder here, or choose one above.
-        </div>
-        <pre id="desktop-folder-summary" class="cloud-status">No folder selected.</pre>
-        <div class="cloud-actions">
-          <button id="desktop-backup-btn" type="button">Backup Current Data</button>
-          <input id="desktop-backup-file" type="file" accept=".zip">
-          <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
-          <button id="desktop-use-old-inventory-btn" type="button" class="secondary">Use Desktop old inventory</button>
-          <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview Folder Import</button>
-          <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
-        </div>
-        <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
       </section>
 '''
         html = html.replace('      <h2>Storage And Branding</h2>', '      <div id="desktop-cloud-admin-shell" class="desktop-admin-shell" hidden>\n      <h2>Storage And Branding</h2>')
