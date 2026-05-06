@@ -2654,7 +2654,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     const importLink = document.getElementById('desktop-import-link');
     if (importLink) {
       importLink.addEventListener('click', () => {
-        window.location.href = '/settings#desktop-import-panel';
+        window.location.href = '/settings?view=import';
       });
     }
     const search = document.getElementById('search-input');
@@ -2680,8 +2680,39 @@ async function load(){const q=document.getElementById('search').value||'';const 
 document.getElementById('category').addEventListener('change',load);document.getElementById('search').addEventListener('input',load);document.getElementById('print').addEventListener('click',()=>window.print());load();
 </script></body></html>"""
 
+    def desktop_import_html() -> str:
+        html = desktop_settings_html(setup_mode=not store.app_config.setup_complete)
+        html = html.replace('<title>Inventory</title>', '<title>Import Inventory Folder</title>', 1)
+        html = html.replace(
+            '<section class="info-panel" id="desktop-health-panel">',
+            '<section class="info-panel" id="desktop-health-panel" hidden>',
+            1,
+        )
+        html = html.replace(
+            '<section class="info-panel" id="desktop-lan-panel">',
+            '<section class="info-panel" id="desktop-lan-panel" hidden>',
+            1,
+        )
+        html = html.replace(
+            '<section class="info-panel" id="desktop-admin-access-panel">',
+            '<section class="info-panel" id="desktop-admin-access-panel" hidden>',
+            1,
+        )
+        html = html.replace(
+            '<section class="info-panel desktop-admin-shell" id="desktop-admin-shell"',
+            '<section class="info-panel desktop-admin-shell" id="desktop-admin-shell" hidden',
+            1,
+        )
+        html = html.replace(
+            '<section class="info-panel desktop-wizard" id="desktop-setup-wizard"',
+            '<section class="info-panel desktop-wizard" id="desktop-setup-wizard" hidden',
+            1,
+        )
+        return html
+
     @app.route("/", methods=["GET"])
     @app.route("/settings", methods=["GET"])
+    @app.route("/import", methods=["GET"])
     @app.route("/setup", methods=["GET"])
     @app.route("/orders", methods=["GET"])
     @app.route("/orders/view", methods=["GET"])
@@ -2690,7 +2721,11 @@ document.getElementById('category').addEventListener('change',load);document.get
         if request.path == "/setup":
             return Response(desktop_settings_html(setup_mode=True), mimetype="text/html; charset=utf-8")
         if request.path == "/settings":
+            if arg("view") == "import":
+                return Response(desktop_import_html(), mimetype="text/html; charset=utf-8")
             return Response(desktop_settings_html(setup_mode=not store.app_config.setup_complete), mimetype="text/html; charset=utf-8")
+        if request.path == "/import":
+            return Response(desktop_import_html(), mimetype="text/html; charset=utf-8")
         if request.path == "/":
             return Response(desktop_inventory_html(), mimetype="text/html; charset=utf-8")
         return Response(store.index_html, mimetype="text/html; charset=utf-8")
