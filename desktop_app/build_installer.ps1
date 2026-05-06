@@ -96,6 +96,9 @@ $pyInstallerArgs = @(
   "--clean",
   "--onedir",
   "--name", "StingrayInventoryDesktop",
+  "--distpath", $distDir,
+  "--workpath", $buildDir,
+  "--specpath", $repoRoot,
   "--add-data", "$firmwareIno;firmware\\StingrayInventoryESP32"
 )
 
