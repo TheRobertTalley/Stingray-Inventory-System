@@ -141,7 +141,12 @@ TP-Link checks if phones cannot connect:
 
 ## Inventory Folder Import
 
-After unlocking admin settings, use **Import Inventory Folder**:
+Use the dedicated **Import Inventory Folder** page first:
+
+- Open **Views And Tools** -> **Import Inventory Folder**, or go straight to `/import-folder`.
+- Unlock admin access if the page asks for a PIN.
+
+Then use **Import Inventory Folder**:
 
 - Enter a copied inventory folder path, such as `C:\Users\TALLEY\Desktop\old inventory`.
 - You can also point it at a copied SD-style folder from an older Stingray export.
