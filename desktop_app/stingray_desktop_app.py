@@ -1961,7 +1961,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         <div id="desktop-folder-dropzone" class="desktop-dropzone" tabindex="0" role="button" aria-label="Drop an inventory folder here">
           Drop an inventory folder here, or choose one above.
         </div>
-        <pre id="desktop-folder-summary" class="cloud-status">No folder selected.</pre>
+        <div id="desktop-folder-summary" class="status-panel is-empty" role="status" aria-live="polite">No folder selected yet.</div>
         <div class="cloud-actions">
           <button id="desktop-backup-btn" type="button">Backup Current Data</button>
           <input id="desktop-backup-file" type="file" accept=".zip">
@@ -1970,7 +1970,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview Folder Import</button>
           <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
         </div>
-        <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
+        <div id="desktop-import-status" class="status-panel is-empty" role="status" aria-live="polite">Ready to import.</div>
       </section>
 
       <section class="info-panel" id="desktop-lan-panel">
@@ -2022,7 +2022,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           <button id="desktop-admin-action-btn" type="button">Unlock Admin Settings</button>
           <button id="desktop-admin-lock-btn" type="button" class="secondary">Lock Admin Settings</button>
         </div>
-        <pre id="desktop-admin-status" class="cloud-status">Admin settings are locked.</pre>
+        <div id="desktop-admin-status" class="status-panel is-empty" role="status" aria-live="polite">Admin access is locked. Unlock it to change advanced import settings.</div>
       </section>
 
       <section class="info-panel desktop-admin-shell" id="desktop-admin-shell"{admin_shell_hidden}>
@@ -2400,7 +2400,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       useOldInventoryBtn.hidden = suggestions.length === 0;
       useOldInventoryBtn.textContent = suggestions.length ? `Use ${suggestions[0].label}` : 'Use Detected Desktop Folder';
     }
-    if ($('desktop-import-status') && suggestions.length && $('desktop-import-status').textContent === 'Import ready.') {
+    if (suggestions.length && $('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') {
       $('desktop-import-status').textContent = `Detected import folder: ${suggestions[0].label}`;
     }
     return suggestions;
@@ -2482,7 +2482,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => $('desktop-import-status').textContent = e.message));
     loadImportSuggestions().catch((error) => {
       if (useOldInventoryBtn) useOldInventoryBtn.hidden = true;
-      if ($('desktop-import-status') && $('desktop-import-status').textContent === 'Import ready.') {
+      if ($('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') {
         $('desktop-import-status').textContent = error.message;
       }
     });
@@ -2796,12 +2796,169 @@ document.getElementById('category').addEventListener('change',load);document.get
       background: #edfdf8;
       color: var(--accent-dark);
     }}
-    .cloud-status {{
-      margin: 0.85rem 0 0;
-      padding: 0.8rem;
+    .hero-panel {{
+      display: grid;
+      gap: 0.95rem;
+      background: linear-gradient(135deg, #ffffff, #f0f7f6);
+    }}
+    .hero-badge {{
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      gap: 0.4rem;
+      padding: 0.32rem 0.65rem;
+      border-radius: 999px;
+      background: rgba(15, 122, 114, 0.1);
+      color: var(--accent-dark);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }}
+    .hero-panel h2 {{
+      margin: 0.25rem 0 0.4rem;
+      font-size: 1.32rem;
+    }}
+    .hero-panel p {{
+      margin: 0;
+      color: var(--muted);
+      max-width: 72ch;
+    }}
+    .workflow-grid {{
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }}
+    .workflow-card {{
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 0.9rem;
+      background: #fff;
+    }}
+    .workflow-step {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 999px;
+      margin-bottom: 0.55rem;
+      background: rgba(15, 122, 114, 0.12);
+      color: var(--accent-dark);
+      font-weight: 800;
+    }}
+    .workflow-card strong {{
+      display: block;
+      font-size: 0.98rem;
+      margin-bottom: 0.25rem;
+    }}
+    .workflow-card p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }}
+    .status-panel {{
+      margin-top: 0.85rem;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #f8fbfc;
+      padding: 0.95rem;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.65);
+    }}
+    .status-panel.is-empty {{
+      color: var(--muted);
+    }}
+    .status-head {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }}
+    .status-eyebrow {{
+      margin: 0 0 0.2rem;
+      color: var(--accent-dark);
+      font-size: 0.78rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+    .status-panel h3 {{
+      margin: 0;
+      font-size: 1.04rem;
+    }}
+    .status-subtitle {{
+      margin: 0.22rem 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }}
+    .status-badge {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      background: #e7f5f2;
+      color: var(--accent-dark);
+      font-weight: 700;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }}
+    .status-grid {{
+      display: grid;
+      gap: 0.65rem;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      margin-top: 0.85rem;
+    }}
+    .status-item {{
       border: 1px solid var(--line);
       border-radius: 14px;
-      background: #f7fafb;
+      background: #fff;
+      padding: 0.7rem 0.78rem;
+    }}
+    .status-label {{
+      display: block;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.25rem;
+    }}
+    .status-value {{
+      display: block;
+      font-size: 0.98rem;
+      font-weight: 700;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+    }}
+    .status-note {{
+      margin: 0.8rem 0 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }}
+    .status-list {{
+      margin: 0.8rem 0 0;
+      padding-left: 1.2rem;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    .status-list li + li {{ margin-top: 0.2rem; }}
+    .technical-details {{
+      margin-top: 0.75rem;
+      border-top: 1px solid var(--line);
+      padding-top: 0.65rem;
+    }}
+    .technical-details summary {{
+      cursor: pointer;
+      color: var(--accent-dark);
+      font-weight: 700;
+    }}
+    .debug-json {{
+      margin: 0.65rem 0 0;
+      padding: 0.75rem;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
       color: var(--ink);
       font-family: Consolas, "Courier New", monospace;
       font-size: 0.82rem;
@@ -2833,6 +2990,30 @@ document.getElementById('category').addEventListener('change',load);document.get
     </div>
   </header>
   <main>
+    <section class="hero-panel" aria-label="Import workflow overview">
+      <div>
+        <div class="hero-badge">Import workflow</div>
+        <h2>Bring an older inventory folder into Inventory</h2>
+        <p>Choose a folder, review the preview, then import with plain-English status updates. The page stays focused on the job instead of showing LAN settings.</p>
+      </div>
+      <div class="workflow-grid">
+        <div class="workflow-card">
+          <div class="workflow-step">1</div>
+          <strong>Select a folder</strong>
+          <p>Use the folder picker or drag and drop a Desktop <code>old inventory</code> folder.</p>
+        </div>
+        <div class="workflow-card">
+          <div class="workflow-step">2</div>
+          <strong>Review the preview</strong>
+          <p>Check the item, order, and image counts before making changes.</p>
+        </div>
+        <div class="workflow-card">
+          <div class="workflow-step">3</div>
+          <strong>Import into Inventory</strong>
+          <p>Run the import only after the counts look right and the backup choice makes sense.</p>
+        </div>
+      </div>
+    </section>
     <section id="desktop-import-panel">
       <h2>Import Inventory Folder</h2>
       <p class="caption">Choose a folder like <code>{default_path}</code> or drop one here. This page is import-only; it does not show LAN settings.</p>
@@ -2856,7 +3037,7 @@ document.getElementById('category').addEventListener('change',load);document.get
         <button id="desktop-folder-clear-btn" type="button" class="secondary" hidden>Clear Selected Folder</button>
       </div>
       <div id="desktop-folder-dropzone" class="desktop-dropzone" tabindex="0" role="button" aria-label="Drop an inventory folder here">Drop an inventory folder here, or choose one above.</div>
-      <pre id="desktop-folder-summary" class="cloud-status">No folder selected.</pre>
+      <div id="desktop-folder-summary" class="status-panel is-empty" role="status" aria-live="polite">No folder selected yet.</div>
       <div class="cloud-actions">
         <button id="desktop-backup-btn" type="button">Backup Current Data</button>
         <input id="desktop-backup-file" type="file" accept=".zip">
@@ -2865,7 +3046,7 @@ document.getElementById('category').addEventListener('change',load);document.get
         <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview Folder Import</button>
         <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
       </div>
-      <pre id="desktop-import-status" class="cloud-status">Import ready.</pre>
+      <div id="desktop-import-status" class="status-panel is-empty" role="status" aria-live="polite">Ready to import.</div>
     </section>
     <section id="desktop-admin-access-panel">
       <h2>Admin Access</h2>
@@ -2888,7 +3069,7 @@ document.getElementById('category').addEventListener('change',load);document.get
         <button id="desktop-admin-action-btn" type="button">Unlock Admin Settings</button>
         <button id="desktop-admin-lock-btn" type="button" class="secondary">Lock Admin Settings</button>
       </div>
-      <pre id="desktop-admin-status" class="cloud-status">{setup_note}</pre>
+      <div id="desktop-admin-status" class="status-panel is-empty" role="status" aria-live="polite">Admin access is locked. Unlock it to change advanced import settings.</div>
     </section>
   </main>
   <script>
@@ -2912,21 +3093,76 @@ document.getElementById('category').addEventListener('change',load);document.get
   async function post(url, body) {{
     return json(url, {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body || {{}})}});
   }}
+  function escapeHtml(value) {{
+    return String(value ?? '').replace(/[&<>"']/g, (ch) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
+  }}
+  function countText(value) {{
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toLocaleString() : String(value ?? '0');
+  }}
+  function renderPanel(targetId, config) {{
+    const target = $(targetId);
+    if (!target) return;
+    const metrics = Array.isArray(config.metrics) ? config.metrics : [];
+    const details = Array.isArray(config.details) ? config.details.filter(Boolean) : [];
+    const tone = config.tone || 'neutral';
+    target.className = `status-panel ${{tone === 'empty' ? 'is-empty' : ''}}`.trim();
+    target.innerHTML = [
+      '<div class="status-head">',
+      '<div>',
+      `<p class="status-eyebrow">${{escapeHtml(config.eyebrow || 'Status')}}</p>`,
+      `<h3>${{escapeHtml(config.title || 'Ready')}}</h3>`,
+      config.subtitle ? `<p class="status-subtitle">${{escapeHtml(config.subtitle)}}</p>` : '',
+      '</div>',
+      config.badge ? `<span class="status-badge">${{escapeHtml(config.badge)}}</span>` : '',
+      '</div>',
+      metrics.length ? `<div class="status-grid">${{metrics.map(([label, value]) => `<div class="status-item"><span class="status-label">${{escapeHtml(label)}}</span><span class="status-value">${{escapeHtml(value)}}</span></div>`).join('')}}</div>` : '',
+      details.length ? `<ul class="status-list">${{details.map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>` : '',
+      config.note ? `<p class="status-note">${{escapeHtml(config.note)}}</p>` : ''
+    ].join('');
+  }}
+  function previewSummaryText(preview) {{
+    const messages = Array.isArray(preview?.messages) ? preview.messages.filter(Boolean) : [];
+    return messages.length ? messages.join(' ') : 'Preview ready.';
+  }}
+  function importResultDetails(result) {{
+    const details = [];
+    if (result?.backup) details.push(`Backup: ${{result.backup}}`);
+    if (result?.import_root) details.push(`Folder: ${{result.import_root}}`);
+    if (result?.mode) details.push(`Mode: ${{result.mode}}`);
+    if (result?.message) details.push(result.message);
+    return details;
+  }}
   function refreshFolderSummary() {{
-    if ($('desktop-folder-summary')) {{
-      $('desktop-folder-summary').textContent = stagedImportToken ? [
-        `Folder staged: ${{stagedImportLabel || 'Selected folder'}}`,
-        `Token: ${{stagedImportToken}}`,
-        `Items found: ${{stagedImportPreview?.inventory_items_found ?? 0}}`,
-        `Orders found: ${{stagedImportPreview?.orders_found ?? 0}}`,
-        `Images found: ${{stagedImportPreview?.images_found ?? 0}}`,
-        `Transactions found: ${{stagedImportPreview?.transaction_rows_found ?? 0}}`,
-        `Device log rows found: ${{stagedImportPreview?.device_log_rows_found ?? 0}}`,
-        `Time log rows found: ${{stagedImportPreview?.time_log_rows_found ?? 0}}`,
-        '',
-        'Use Preview Folder Import to review the staged folder, then Import Inventory Folder to bring it in.'
-      ].join('\\n') : 'No folder selected.';
-    }}
+    renderPanel('desktop-folder-summary', stagedImportToken ? {{
+      tone: 'neutral',
+      eyebrow: 'Folder selected',
+      title: stagedImportLabel || 'Selected folder',
+      subtitle: 'The folder is staged and ready for preview.',
+      badge: 'Ready to preview',
+      metrics: [
+        ['Items', countText(stagedImportPreview?.inventory_items_found ?? 0)],
+        ['Orders', countText(stagedImportPreview?.orders_found ?? 0)],
+        ['Images', countText(stagedImportPreview?.images_found ?? 0)],
+        ['Transactions', countText(stagedImportPreview?.transaction_rows_found ?? 0)],
+        ['Device logs', countText(stagedImportPreview?.device_log_rows_found ?? 0)],
+        ['Time logs', countText(stagedImportPreview?.time_log_rows_found ?? 0)]
+      ],
+      note: 'Preview the folder before importing so you can confirm the counts.'
+    }} : {{
+      tone: 'empty',
+      eyebrow: 'Selection',
+      title: 'No folder selected yet',
+      subtitle: 'Choose a folder or drop one here to stage it for import.',
+      badge: 'Waiting',
+      metrics: [
+        ['Items', '0'],
+        ['Orders', '0'],
+        ['Images', '0'],
+        ['Transactions', '0']
+      ],
+      note: 'The import action becomes useful after a folder is staged.'
+    }});
     if (folderClearBtn) folderClearBtn.hidden = !stagedImportToken;
   }}
   function clearStagedFolder() {{
@@ -2993,13 +3229,26 @@ document.getElementById('category').addEventListener('change',load);document.get
     stagedImportToken = data.token || '';
     stagedImportLabel = data.source_label || sourceLabel || 'Selected folder';
     stagedImportPreview = data.preview || null;
-    if ($('desktop-import-status')) $('desktop-import-status').textContent = `Folder staged: ${{stagedImportLabel}}. Preview and import controls now use the staged upload.`;
+    renderPanel('desktop-import-status', {{
+      tone: 'positive',
+      eyebrow: 'Folder staged',
+      title: 'Ready for preview',
+      subtitle: `${{stagedImportLabel}} is uploaded locally and ready for review.`,
+      badge: 'Step 1 complete',
+      metrics: [
+        ['Files accepted', countText(data.file_count ?? entries.length)],
+        ['Items found', countText(stagedImportPreview?.inventory_items_found ?? 0)],
+        ['Orders found', countText(stagedImportPreview?.orders_found ?? 0)]
+      ],
+      note: 'Click Preview Folder Import to review the folder before importing it.'
+    }});
     refreshFolderSummary();
     return data;
   }}
   async function stageSelectedFolder(entries, label) {{
     const data = await stageFolderEntries(entries, label);
-    if ($('desktop-folder-summary')) $('desktop-folder-summary').textContent = JSON.stringify(data.preview || data, null, 2);
+    stagedImportPreview = data.preview || stagedImportPreview;
+    refreshFolderSummary();
     return data;
   }}
   async function previewStagedFolder() {{
@@ -3021,37 +3270,115 @@ document.getElementById('category').addEventListener('change',load);document.get
       useOldInventoryBtn.hidden = suggestions.length === 0;
       useOldInventoryBtn.textContent = suggestions.length ? `Use ${{suggestions[0].label}}` : 'Use Detected Desktop Folder';
     }}
-    if ($('desktop-import-status') && suggestions.length && $('desktop-import-status').textContent === 'Import ready.') {{
-      $('desktop-import-status').textContent = `Detected import folder: ${{suggestions[0].label}}`;
+    if (suggestions.length && $('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') {{
+      renderPanel('desktop-import-status', {{
+        tone: 'info',
+        eyebrow: 'Suggested folder',
+        title: suggestions[0].label || 'Detected desktop folder',
+        subtitle: 'This folder was detected automatically on this PC.',
+        badge: 'Detected',
+        note: 'Preview the folder before importing so you can confirm the counts.'
+      }});
     }}
     return suggestions;
   }}
   async function previewSd() {{
     if (stagedImportToken) {{
       const preview = await previewStagedFolder();
-      $('desktop-import-status').textContent = JSON.stringify(preview, null, 2);
+      renderPanel('desktop-import-status', {{
+        tone: 'info',
+        eyebrow: 'Preview ready',
+        title: 'Review the staged folder',
+        subtitle: previewSummaryText(preview),
+        badge: 'Step 2 complete',
+        metrics: [
+          ['Items', countText(preview?.inventory_items_found ?? 0)],
+          ['Orders', countText(preview?.orders_found ?? 0)],
+          ['Images', countText(preview?.images_found ?? 0)],
+          ['Transactions', countText(preview?.transaction_rows_found ?? 0)]
+        ],
+        details: importResultDetails(preview)
+      }});
       return;
     }}
-    $('desktop-import-status').textContent = JSON.stringify(await json(`/api/desktop/sd/preview?path=${{encodeURIComponent($('desktop-sd-path').value)}}`), null, 2);
+    const preview = await json(`/api/desktop/sd/preview?path=${{encodeURIComponent($('desktop-sd-path').value)}}`);
+    renderPanel('desktop-import-status', {{
+      tone: 'info',
+      eyebrow: 'Preview ready',
+      title: 'Review the folder contents',
+      subtitle: previewSummaryText(preview),
+      badge: 'Step 2 of 3',
+      metrics: [
+        ['Items', countText(preview?.inventory_items_found ?? 0)],
+        ['Orders', countText(preview?.orders_found ?? 0)],
+        ['Images', countText(preview?.images_found ?? 0)],
+        ['Transactions', countText(preview?.transaction_rows_found ?? 0)]
+      ],
+      details: importResultDetails(preview)
+    }});
   }}
   async function importSd() {{
     if (stagedImportToken) {{
       const result = await post('/api/desktop/sd/import', {{token: stagedImportToken, mode: $('desktop-sd-mode').value}});
       clearStagedFolder();
-      $('desktop-import-status').textContent = JSON.stringify(result, null, 2);
+      renderPanel('desktop-import-status', {{
+        tone: 'positive',
+        eyebrow: 'Import complete',
+        title: 'Inventory folder imported',
+        subtitle: 'The folder was processed and the live data files were updated.',
+        badge: 'Step 3 complete',
+        metrics: [
+          ['Items imported', countText(result?.items_imported ?? 0)],
+          ['Items skipped', countText(result?.items_skipped ?? 0)],
+          ['Orders added', countText(result?.orders_added ?? 0)],
+          ['Transactions imported', countText(result?.transactions_imported ?? 0)]
+        ],
+        details: importResultDetails(result),
+        note: 'Refresh the inventory page to see the imported data.'
+      }});
+      refreshStatus();
       return;
     }}
-    $('desktop-import-status').textContent = JSON.stringify(await post('/api/desktop/sd/import', {{path: $('desktop-sd-path').value, mode: $('desktop-sd-mode').value}}), null, 2);
+    const result = await post('/api/desktop/sd/import', {{path: $('desktop-sd-path').value, mode: $('desktop-sd-mode').value}});
+    renderPanel('desktop-import-status', {{
+      tone: 'positive',
+      eyebrow: 'Import complete',
+      title: 'Inventory folder imported',
+      subtitle: 'The selected folder was processed and merged into Inventory.',
+      badge: 'Done',
+      metrics: [
+        ['Items imported', countText(result?.items_imported ?? 0)],
+        ['Items skipped', countText(result?.items_skipped ?? 0)],
+        ['Orders added', countText(result?.orders_added ?? 0)],
+        ['Transactions imported', countText(result?.transactions_imported ?? 0)]
+      ],
+      details: importResultDetails(result),
+      note: 'Go back to the inventory screen to review the imported records.'
+    }});
   }}
   async function backup() {{
     const result = await post('/api/desktop/backup', {{}});
-    $('desktop-import-status').textContent = JSON.stringify(result, null, 2);
+    renderPanel('desktop-import-status', {{
+      tone: 'neutral',
+      eyebrow: 'Backup created',
+      title: 'Current data backed up',
+      subtitle: 'The app created a fresh backup before any import changes.',
+      badge: 'Protected',
+      metrics: [['Backup file', result?.backup || 'Created']],
+      note: 'The backup download should start automatically.'
+    }});
     if (result.backup) window.location.href = `/api/desktop/backup/download?name=${{encodeURIComponent(result.backup)}}`;
   }}
   async function importBackup() {{
     const file = $('desktop-backup-file').files[0];
     if (!file) {{
-      $('desktop-import-status').textContent = 'Choose a backup ZIP first.';
+      renderPanel('desktop-import-status', {{
+        tone: 'warning',
+        eyebrow: 'Backup import',
+        title: 'Choose a backup ZIP first',
+        subtitle: 'Use the file picker to choose a backup before importing it.',
+        badge: 'Needs a file'
+      }});
       return;
     }}
     const form = new FormData();
@@ -3059,7 +3386,15 @@ document.getElementById('category').addEventListener('change',load);document.get
     const response = await fetch('/api/desktop/backup/import', {{method:'POST', body: form}});
     const data = await response.json().catch(() => ({{}}));
     if (!response.ok) throw new Error(data.error || `Import failed (${{response.status}})`);
-    $('desktop-import-status').textContent = JSON.stringify(data, null, 2);
+    renderPanel('desktop-import-status', {{
+      tone: 'positive',
+      eyebrow: 'Backup imported',
+      title: 'Backup restored into Inventory',
+      subtitle: 'The uploaded backup replaced the live test data safely.',
+      badge: 'Restored',
+      metrics: [['Records restored', countText(data?.records_restored ?? data?.items_imported ?? 0)]],
+      details: importResultDetails(data)
+    }});
   }}
   async function adminAction() {{
     const pin = $('desktop-admin-pin') ? $('desktop-admin-pin').value.trim() : '';
@@ -3067,14 +3402,26 @@ document.getElementById('category').addEventListener('change',load);document.get
     const confirmPin = $('desktop-admin-new-pin-confirm') ? $('desktop-admin-new-pin-confirm').value.trim() : '';
     const action = newPin ? 'set_pin' : 'unlock';
     const result = await post('/api/desktop/admin', {{action, pin, new_pin: newPin, confirm_pin: confirmPin}});
-    if ($('desktop-admin-status')) $('desktop-admin-status').textContent = result.message || JSON.stringify(result, null, 2);
+    renderPanel('desktop-admin-status', {{
+      tone: 'neutral',
+      eyebrow: 'Admin access',
+      title: result.message || 'Admin settings updated',
+      subtitle: 'Advanced actions on this page are now available to the current session.',
+      badge: 'Unlocked'
+    }});
     if ($('desktop-admin-pin')) $('desktop-admin-pin').value = '';
     if ($('desktop-admin-new-pin')) $('desktop-admin-new-pin').value = '';
     if ($('desktop-admin-new-pin-confirm')) $('desktop-admin-new-pin-confirm').value = '';
   }}
   async function lockAdmin() {{
     const result = await post('/api/desktop/admin', {{action: 'lock'}});
-    if ($('desktop-admin-status')) $('desktop-admin-status').textContent = result.message || 'Admin settings locked.';
+    renderPanel('desktop-admin-status', {{
+      tone: 'empty',
+      eyebrow: 'Admin access',
+      title: result.message || 'Admin settings locked.',
+      subtitle: 'The page is back in protected mode.',
+      badge: 'Locked'
+    }});
   }}
   async function handleFolderSelection() {{
     const entries = collectPickerEntries();
@@ -3091,13 +3438,13 @@ document.getElementById('category').addEventListener('change',load);document.get
   document.addEventListener('DOMContentLoaded', () => {{
     if (folderPickerBtn && folderPickerInput) {{
       folderPickerBtn.addEventListener('click', () => folderPickerInput.click());
-      folderPickerInput.addEventListener('change', () => handleFolderSelection().catch((error) => $('desktop-import-status').textContent = error.message));
+      folderPickerInput.addEventListener('change', () => handleFolderSelection().catch((error) => renderPanel('desktop-import-status', {{tone:'warning', eyebrow:'Folder selection', title:'Could not stage folder', subtitle:error.message, badge:'Check folder'}})));
     }}
-    if (folderClearBtn) folderClearBtn.addEventListener('click', () => {{ clearStagedFolder(); $('desktop-import-status').textContent = 'Folder selection cleared.'; }});
+    if (folderClearBtn) folderClearBtn.addEventListener('click', () => {{ clearStagedFolder(); renderPanel('desktop-import-status', {{tone:'empty', eyebrow:'Folder selection', title:'Folder selection cleared', subtitle:'Choose a folder or drop one here to stage it again.', badge:'Waiting'}}); }});
     if (folderDropzone) {{
       folderDropzone.addEventListener('dragover', (event) => {{ event.preventDefault(); folderDropzone.classList.add('dragging'); }});
       folderDropzone.addEventListener('dragleave', () => folderDropzone.classList.remove('dragging'));
-      folderDropzone.addEventListener('drop', (event) => handleFolderDrop(event).catch((error) => $('desktop-import-status').textContent = error.message));
+      folderDropzone.addEventListener('drop', (event) => handleFolderDrop(event).catch((error) => renderPanel('desktop-import-status', {{tone:'warning', eyebrow:'Folder selection', title:'Could not stage dropped folder', subtitle:error.message, badge:'Check folder'}})));
       folderDropzone.addEventListener('click', () => folderPickerInput && folderPickerInput.click());
       folderDropzone.addEventListener('keydown', (event) => {{ if (event.key === 'Enter' || event.key === ' ') {{ event.preventDefault(); folderPickerInput && folderPickerInput.click(); }} }});
     }}
@@ -3107,22 +3454,41 @@ document.getElementById('category').addEventListener('change',load);document.get
           const suggestions = importSuggestions.length ? importSuggestions : await loadImportSuggestions();
           if (suggestions.length && $('desktop-sd-path')) {{
             $('desktop-sd-path').value = suggestions[0].path || '{default_path}';
-            $('desktop-import-status').textContent = `Using ${{suggestions[0].label}}. Preview the folder before importing.`;
+            renderPanel('desktop-import-status', {{
+              tone: 'info',
+              eyebrow: 'Suggested folder',
+              title: suggestions[0].label || 'Detected desktop folder',
+              subtitle: 'This folder was detected automatically on this PC.',
+              badge: 'Detected',
+              note: 'Preview the folder before importing so you can confirm the counts.'
+            }});
           }} else {{
-            $('desktop-import-status').textContent = 'No likely inventory folder was detected on this PC.';
+            renderPanel('desktop-import-status', {{
+              tone: 'warning',
+              eyebrow: 'Suggested folder',
+              title: 'No likely inventory folder was detected',
+              subtitle: 'You can still choose a folder manually with the picker above.',
+              badge: 'Manual selection'
+            }});
           }}
         }} catch (error) {{
-          $('desktop-import-status').textContent = error.message;
+          renderPanel('desktop-import-status', {{
+            tone: 'warning',
+            eyebrow: 'Suggested folder',
+            title: 'Could not load the suggestion list',
+            subtitle: error.message,
+            badge: 'Check path'
+          }});
         }}
       }});
     }}
     $('desktop-preview-sd-btn').addEventListener('click', previewSd);
     $('desktop-import-sd-btn').addEventListener('click', importSd);
     $('desktop-backup-btn').addEventListener('click', backup);
-    $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => $('desktop-import-status').textContent = e.message));
-    $('desktop-admin-action-btn').addEventListener('click', () => adminAction().catch((error) => $('desktop-admin-status').textContent = error.message));
-    $('desktop-admin-lock-btn').addEventListener('click', () => lockAdmin().catch((error) => $('desktop-admin-status').textContent = error.message));
-    loadImportSuggestions().catch((error) => {{ if (useOldInventoryBtn) useOldInventoryBtn.hidden = true; if ($('desktop-import-status') && $('desktop-import-status').textContent === 'Import ready.') $('desktop-import-status').textContent = error.message; }});
+    $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => renderPanel('desktop-import-status', {{tone:'warning', eyebrow:'Backup import', title:'Import failed', subtitle:e.message, badge:'Check file'}})));
+    $('desktop-admin-action-btn').addEventListener('click', () => adminAction().catch((error) => renderPanel('desktop-admin-status', {{tone:'warning', eyebrow:'Admin access', title:'Could not update admin access', subtitle:error.message, badge:'Check PIN'}})));
+    $('desktop-admin-lock-btn').addEventListener('click', () => lockAdmin().catch((error) => renderPanel('desktop-admin-status', {{tone:'warning', eyebrow:'Admin access', title:'Could not lock admin access', subtitle:error.message, badge:'Check session'}})));
+    loadImportSuggestions().catch((error) => {{ if (useOldInventoryBtn) useOldInventoryBtn.hidden = true; if ($('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') renderPanel('desktop-import-status', {{tone:'warning', eyebrow:'Suggested folder', title:'Could not detect a likely folder', subtitle:error.message, badge:'Manual selection'}}); }});
     refreshFolderSummary();
   }});
 }})();
