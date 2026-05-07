@@ -1962,14 +1962,13 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           Drop an inventory folder here, or choose one above.
         </div>
         <div id="desktop-folder-summary" class="status-panel is-empty" role="status" aria-live="polite">No folder selected yet.</div>
-        <div class="cloud-actions">
-          <button id="desktop-backup-btn" type="button">Backup Current Data</button>
-          <input id="desktop-backup-file" type="file" accept=".zip">
-          <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
-          <button id="desktop-use-old-inventory-btn" type="button" class="secondary">Use Desktop old inventory</button>
-          <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview Folder Import</button>
-          <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
-        </div>
+      <div class="cloud-actions">
+        <button id="desktop-backup-btn" type="button">Backup Current Data</button>
+        <input id="desktop-backup-file" type="file" accept=".zip">
+        <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
+        <button id="desktop-use-old-inventory-btn" type="button" class="secondary">Use Desktop old inventory</button>
+        <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
+      </div>
         <div id="desktop-import-status" class="status-panel is-empty" role="status" aria-live="polite">Ready to import.</div>
       </section>
 
@@ -2218,14 +2217,6 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       setTimeout(refreshStatus, 600);
     }
   }
-  async function previewSd() {
-    if (stagedImportToken) {
-      const preview = await previewStagedFolder();
-      $('desktop-import-status').textContent = JSON.stringify(preview, null, 2);
-      return;
-    }
-    $('desktop-import-status').textContent = JSON.stringify(await json(`/api/desktop/sd/preview?path=${encodeURIComponent($('desktop-sd-path').value)}`), null, 2);
-  }
   async function importSd() {
     if (stagedImportToken) {
       const result = await post('/api/desktop/sd/import', {token: stagedImportToken, mode: $('desktop-sd-mode').value});
@@ -2270,7 +2261,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       `Device log rows found: ${preview.device_log_rows_found ?? 0}`,
       `Time log rows found: ${preview.time_log_rows_found ?? 0}`,
       '',
-      'Use Preview Folder Import to review the staged folder, then Import Inventory Folder to bring it in.'
+      'The folder is staged and ready to import.'
     ].join('\n');
   }
   function refreshFolderSummary() {
@@ -2365,7 +2356,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     stagedImportLabel = data.source_label || sourceLabel || 'Selected folder';
     stagedImportPreview = data.preview || null;
     if ($('desktop-import-status')) {
-      $('desktop-import-status').textContent = `Folder staged: ${stagedImportLabel}. Preview and import controls now use the staged upload.`;
+      $('desktop-import-status').textContent = `Folder staged: ${stagedImportLabel}. Items found: ${stagedImportPreview?.inventory_items_found ?? 0}.`;
     }
     refreshFolderSummary();
     return data;
@@ -2373,18 +2364,9 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
   async function stageSelectedFolder(entries, label) {
     const data = await stageFolderEntries(entries, label);
     if ($('desktop-folder-summary')) {
-      $('desktop-folder-summary').textContent = JSON.stringify(data.preview || data, null, 2);
+      $('desktop-folder-summary').textContent = `Items found: ${data.preview?.inventory_items_found ?? data.inventory_items_found ?? 0}`;
     }
     return data;
-  }
-  async function previewStagedFolder() {
-    if (!stagedImportToken) {
-      return null;
-    }
-    const preview = await post('/api/desktop/import/staged/preview', {token: stagedImportToken});
-    stagedImportPreview = preview;
-    refreshFolderSummary();
-    return preview;
   }
   async function loadImportSuggestions() {
     const response = await json('/api/desktop/import/suggestions');
@@ -2400,8 +2382,8 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       useOldInventoryBtn.hidden = suggestions.length === 0;
       useOldInventoryBtn.textContent = suggestions.length ? `Use ${suggestions[0].label}` : 'Use Detected Desktop Folder';
     }
-    if (suggestions.length && $('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') {
-      $('desktop-import-status').textContent = `Detected import folder: ${suggestions[0].label}`;
+      if (suggestions.length && $('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') {
+      $('desktop-import-status').textContent = `Detected import folder: ${suggestions[0].label}. Items found: ${stagedImportPreview?.inventory_items_found ?? 0}.`;
     }
     return suggestions;
   }
@@ -2467,7 +2449,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           const suggestions = importSuggestions.length ? importSuggestions : await loadImportSuggestions();
           if (suggestions.length && $('desktop-sd-path')) {
             $('desktop-sd-path').value = suggestions[0].path || '';
-            $('desktop-import-status').textContent = `Using ${suggestions[0].label}. Preview the folder before importing.`;
+            $('desktop-import-status').textContent = `Using ${suggestions[0].label}. Items found: ${stagedImportPreview?.inventory_items_found ?? 0}.`;
           } else {
             $('desktop-import-status').textContent = 'No likely inventory folder was detected on this PC.';
           }
@@ -2476,7 +2458,6 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         }
       });
     }
-    $('desktop-preview-sd-btn').addEventListener('click', previewSd);
     $('desktop-import-sd-btn').addEventListener('click', importSd);
     $('desktop-backup-btn').addEventListener('click', backup);
     $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => $('desktop-import-status').textContent = e.message));
@@ -2498,8 +2479,8 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     def desktop_item_html() -> str:
         html = store.item_html
         panel = r'''
-    <section class="info-panel" id="desktop-edit-panel">
-      <h2>Edit Item</h2>
+      <section class="info-panel" id="desktop-edit-panel">
+        <h2>Edit Item</h2>
       <div class="meta-grid">
         <label>Part number<input id="desktop-edit-id" type="text"></label>
         <label>Name<input id="desktop-edit-name" type="text"></label>
@@ -2511,14 +2492,15 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         <label>Parent product / kit<input id="desktop-edit-bom-product" type="text"></label>
         <label>Qty used in parent<input id="desktop-edit-bom-qty" type="number" min="0"></label>
         <label>Image<input id="desktop-edit-image" type="file" accept="image/*"></label>
-      </div>
-      <div class="actions">
-        <button id="desktop-save-item-btn" type="button">Save Item</button>
-        <button id="desktop-upload-image-btn" type="button" class="secondary">Upload/Replace Image</button>
-        <button id="desktop-remove-image-btn" type="button" class="secondary">Remove Image</button>
-      </div>
-      <div id="desktop-edit-status" class="status"></div>
-    </section>
+        </div>
+        <div class="actions">
+          <button id="desktop-save-item-btn" type="button">Save Item</button>
+          <button id="desktop-sync-qr-btn" type="button" class="secondary">Sync QR to Current URL</button>
+          <button id="desktop-upload-image-btn" type="button" class="secondary">Upload/Replace Image</button>
+          <button id="desktop-remove-image-btn" type="button" class="secondary">Remove Image</button>
+        </div>
+        <div id="desktop-edit-status" class="status"></div>
+      </section>
 '''
         marker = '    <section class="manual-panel">'
         if marker in html and "desktop-edit-panel" not in html:
@@ -2528,18 +2510,28 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 (function(){
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(window.location.search);
-  let currentId = params.get('id') || '';
-  let currentItem = null;
-  async function json(url, options) {
-    const response = await fetch(url, options || {});
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
-    return data;
-  }
-  function status(text, bad) {
-    const el = $('desktop-edit-status');
-    if (el) { el.textContent = text || ''; el.className = bad ? 'status error' : 'status'; }
-  }
+    let currentId = params.get('id') || '';
+    let currentItem = null;
+    async function json(url, options) {
+      const response = await fetch(url, options || {});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+      return data;
+    }
+    function currentQrLink(itemId) {
+      const resolvedId = String(itemId || currentId || '').trim();
+      const qrSource = currentItem && currentItem.qr_link ? String(currentItem.qr_link) : '';
+      try {
+        const base = qrSource ? new URL(qrSource).origin : window.location.origin;
+        return `${base}/item?id=${encodeURIComponent(resolvedId)}`;
+      } catch (error) {
+        return `${window.location.origin}/item?id=${encodeURIComponent(resolvedId)}`;
+      }
+    }
+    function status(text, bad) {
+      const el = $('desktop-edit-status');
+      if (el) { el.textContent = text || ''; el.className = bad ? 'status error' : 'status'; }
+    }
   async function loadEdit() {
     if (!$('desktop-edit-panel') || !currentId) return;
     const payload = await json(`/api/item?id=${encodeURIComponent(currentId)}`);
@@ -2547,16 +2539,16 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     $('desktop-edit-id').value = currentItem.id || '';
     $('desktop-edit-name').value = currentItem.part_name || '';
     $('desktop-edit-category').value = currentItem.category || '';
-    $('desktop-edit-qty').value = currentItem.qty || 0;
-    $('desktop-edit-qr').value = currentItem.qr_code || '';
-    $('desktop-edit-color').value = currentItem.color || '';
-    $('desktop-edit-material').value = currentItem.material || '';
-    $('desktop-edit-bom-product').value = currentItem.bom_product || '';
-    $('desktop-edit-bom-qty').value = currentItem.bom_qty || 0;
-  }
-  async function saveItem() {
-    const body = {
-      original_id: currentId,
+      $('desktop-edit-qty').value = currentItem.qty || 0;
+      $('desktop-edit-qr').value = currentItem.qr_code || '';
+      $('desktop-edit-color').value = currentItem.color || '';
+      $('desktop-edit-material').value = currentItem.material || '';
+      $('desktop-edit-bom-product').value = currentItem.bom_product || '';
+      $('desktop-edit-bom-qty').value = currentItem.bom_qty || 0;
+    }
+    async function saveItem() {
+      const body = {
+        original_id: currentId,
       id: $('desktop-edit-id').value,
       part_name: $('desktop-edit-name').value,
       category: $('desktop-edit-category').value,
@@ -2567,18 +2559,23 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       bom_product: $('desktop-edit-bom-product').value,
       bom_qty: $('desktop-edit-bom-qty').value,
       image_ref: currentItem && currentItem.image_ref || ''
-    };
-    const saved = await json('/api/items/update', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    currentId = saved.item.id;
-    history.replaceState(null, '', `/item?id=${encodeURIComponent(currentId)}`);
-    status('Item saved.');
-    setTimeout(() => window.location.reload(), 500);
-  }
-  async function uploadImage() {
-    const file = $('desktop-edit-image').files[0];
-    if (!file) return status('Choose an image first.', true);
-    const form = new FormData();
-    form.append('id', currentId);
+      };
+      const saved = await json('/api/items/update', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      currentId = saved.item.id;
+      history.replaceState(null, '', `/item?id=${encodeURIComponent(currentId)}`);
+      status('Item saved.');
+      setTimeout(() => window.location.reload(), 500);
+    }
+    async function syncQr() {
+      const qr = currentQrLink($('desktop-edit-id') ? $('desktop-edit-id').value : currentId);
+      if ($('desktop-edit-qr')) $('desktop-edit-qr').value = qr;
+      await saveItem();
+    }
+    async function uploadImage() {
+      const file = $('desktop-edit-image').files[0];
+      if (!file) return status('Choose an image first.', true);
+      const form = new FormData();
+      form.append('id', currentId);
     form.append('image', file);
     await json('/api/items/image', {method:'POST', body: form});
     status('Image saved.');
@@ -2589,14 +2586,29 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     status('Image removed.');
     setTimeout(() => window.location.reload(), 500);
   }
-  document.addEventListener('DOMContentLoaded', () => {
-    if (!$('desktop-edit-panel')) return;
-    $('desktop-save-item-btn').addEventListener('click', () => saveItem().catch((e) => status(e.message, true)));
-    $('desktop-upload-image-btn').addEventListener('click', () => uploadImage().catch((e) => status(e.message, true)));
-    $('desktop-remove-image-btn').addEventListener('click', () => removeImage().catch((e) => status(e.message, true)));
-    loadEdit().catch((e) => status(e.message, true));
-  });
-})();
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!$('desktop-edit-panel')) return;
+      $('desktop-save-item-btn').addEventListener('click', () => saveItem().catch((e) => {
+        const message = String(e && e.message ? e.message : e || '');
+        if (message.includes('already exists')) {
+          status('That part number is already in use. Choose a different one, or open the existing item.', true);
+          return;
+        }
+        status(message, true);
+      }));
+      $('desktop-sync-qr-btn').addEventListener('click', () => syncQr().catch((e) => {
+        const message = String(e && e.message ? e.message : e || '');
+        if (message.includes('already exists')) {
+          status('That part number is already in use. Choose a different one, or open the existing item.', true);
+          return;
+        }
+        status(message, true);
+      }));
+      $('desktop-upload-image-btn').addEventListener('click', () => uploadImage().catch((e) => status(e.message, true)));
+      $('desktop-remove-image-btn').addEventListener('click', () => removeImage().catch((e) => status(e.message, true)));
+      loadEdit().catch((e) => status(e.message, true));
+    });
+  })();
 </script>
 '''
         return html.replace("</body>", script + "\n</body>") if "loadEdit()" not in html else html
@@ -2620,20 +2632,14 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           </div>
         </div>""",
             """        <div>
-          <div class="small">CSV exports</div>
+          <div class="small">Inventory Actions</div>
           <div class="export-strip">
             <button id="refresh-btn" type="button">Refresh Inventory</button>
+            <button id="desktop-import-link" type="button" class="secondary">Import Inventory Folder</button>
             <button class="secondary" type="button" data-export="all">Export All</button>
             <button class="secondary" type="button" data-export="part">Export Parts</button>
             <button class="secondary" type="button" data-export="product">Export Products</button>
             <button class="secondary" type="button" data-export="kit">Export Kits</button>
-          </div>
-        </div>
-
-        <div>
-          <div class="small">Imports</div>
-          <div class="export-strip">
-            <button id="desktop-import-link" type="button" class="secondary">Import Inventory Folder</button>
           </div>
         </div>""",
             1,
@@ -2994,7 +3000,7 @@ document.getElementById('category').addEventListener('change',load);document.get
       <div>
         <div class="hero-badge">Import workflow</div>
         <h2>Bring an older inventory folder into Inventory</h2>
-        <p>Choose a folder, review the preview, then import with plain-English status updates. The page stays focused on the job instead of showing LAN settings.</p>
+        <p>Choose a folder, see how many items it contains, then import with plain-English status updates. The page stays focused on the job instead of showing LAN settings.</p>
       </div>
       <div class="workflow-grid">
         <div class="workflow-card">
@@ -3004,13 +3010,13 @@ document.getElementById('category').addEventListener('change',load);document.get
         </div>
         <div class="workflow-card">
           <div class="workflow-step">2</div>
-          <strong>Review the preview</strong>
-          <p>Check the item, order, and image counts before making changes.</p>
+          <strong>Check the item count</strong>
+          <p>See how many inventory items are in the folder before you import it.</p>
         </div>
         <div class="workflow-card">
           <div class="workflow-step">3</div>
           <strong>Import into Inventory</strong>
-          <p>Run the import only after the counts look right and the backup choice makes sense.</p>
+          <p>Run the import once the item count looks right and the folder is ready.</p>
         </div>
       </div>
     </section>
@@ -3043,7 +3049,6 @@ document.getElementById('category').addEventListener('change',load);document.get
         <input id="desktop-backup-file" type="file" accept=".zip">
         <button id="desktop-import-backup-btn" type="button" class="secondary">Import Backup ZIP</button>
         <button id="desktop-use-old-inventory-btn" type="button" class="secondary">Use Desktop old inventory</button>
-        <button id="desktop-preview-sd-btn" type="button" class="secondary">Preview Folder Import</button>
         <button id="desktop-import-sd-btn" type="button" class="secondary">Import Inventory Folder</button>
       </div>
       <div id="desktop-import-status" class="status-panel is-empty" role="status" aria-live="polite">Ready to import.</div>
@@ -3121,9 +3126,8 @@ document.getElementById('category').addEventListener('change',load);document.get
       config.note ? `<p class="status-note">${{escapeHtml(config.note)}}</p>` : ''
     ].join('');
   }}
-  function previewSummaryText(preview) {{
-    const messages = Array.isArray(preview?.messages) ? preview.messages.filter(Boolean) : [];
-    return messages.length ? messages.join(' ') : 'Preview ready.';
+  function selectedFolderItemCount() {{
+    return countText(stagedImportPreview?.inventory_items_found ?? 0);
   }}
   function importResultDetails(result) {{
     const details = [];
@@ -3138,17 +3142,13 @@ document.getElementById('category').addEventListener('change',load);document.get
       tone: 'neutral',
       eyebrow: 'Folder selected',
       title: stagedImportLabel || 'Selected folder',
-      subtitle: 'The folder is staged and ready for preview.',
-      badge: 'Ready to preview',
+      subtitle: 'The folder is staged and ready to import.',
+      badge: 'Ready to import',
       metrics: [
-        ['Items', countText(stagedImportPreview?.inventory_items_found ?? 0)],
-        ['Orders', countText(stagedImportPreview?.orders_found ?? 0)],
-        ['Images', countText(stagedImportPreview?.images_found ?? 0)],
-        ['Transactions', countText(stagedImportPreview?.transaction_rows_found ?? 0)],
-        ['Device logs', countText(stagedImportPreview?.device_log_rows_found ?? 0)],
-        ['Time logs', countText(stagedImportPreview?.time_log_rows_found ?? 0)]
+        ['Items', selectedFolderItemCount()],
+        ['Files staged', countText(stagedImportPreview?.file_count ?? 0)]
       ],
-      note: 'Preview the folder before importing so you can confirm the counts.'
+      note: 'Import the folder when the item count looks right.'
     }} : {{
       tone: 'empty',
       eyebrow: 'Selection',
@@ -3157,9 +3157,7 @@ document.getElementById('category').addEventListener('change',load);document.get
       badge: 'Waiting',
       metrics: [
         ['Items', '0'],
-        ['Orders', '0'],
-        ['Images', '0'],
-        ['Transactions', '0']
+        ['Files staged', '0']
       ],
       note: 'The import action becomes useful after a folder is staged.'
     }});
@@ -3232,31 +3230,22 @@ document.getElementById('category').addEventListener('change',load);document.get
     renderPanel('desktop-import-status', {{
       tone: 'positive',
       eyebrow: 'Folder staged',
-      title: 'Ready for preview',
-      subtitle: `${{stagedImportLabel}} is uploaded locally and ready for review.`,
+      title: 'Ready to import',
+      subtitle: `${{stagedImportLabel}} is uploaded locally and ready to import.`,
       badge: 'Step 1 complete',
       metrics: [
         ['Files accepted', countText(data.file_count ?? entries.length)],
-        ['Items found', countText(stagedImportPreview?.inventory_items_found ?? 0)],
-        ['Orders found', countText(stagedImportPreview?.orders_found ?? 0)]
+        ['Items found', selectedFolderItemCount()]
       ],
-      note: 'Click Preview Folder Import to review the folder before importing it.'
+      note: 'Click Import Inventory Folder to bring it into Inventory.'
     }});
     refreshFolderSummary();
     return data;
   }}
   async function stageSelectedFolder(entries, label) {{
     const data = await stageFolderEntries(entries, label);
-    stagedImportPreview = data.preview || stagedImportPreview;
     refreshFolderSummary();
     return data;
-  }}
-  async function previewStagedFolder() {{
-    if (!stagedImportToken) return null;
-    const preview = await post('/api/desktop/import/staged/preview', {{token: stagedImportToken}});
-    stagedImportPreview = preview;
-    refreshFolderSummary();
-    return preview;
   }}
   async function loadImportSuggestions() {{
     const response = await json('/api/desktop/import/suggestions');
@@ -3264,59 +3253,24 @@ document.getElementById('category').addEventListener('change',load);document.get
     importSuggestions = suggestions;
     if ($('desktop-sd-path')) {{
       const current = $('desktop-sd-path').value.trim();
-      if (!current) $('desktop-sd-path').value = (suggestions[0] && suggestions[0].path) || response.default_path || '{default_path}';
+        if (!current) $('desktop-sd-path').value = (suggestions[0] && suggestions[0].path) || response.default_path || '{default_path}';
+      }}
+      if (useOldInventoryBtn) {{
+        useOldInventoryBtn.hidden = suggestions.length === 0;
+        useOldInventoryBtn.textContent = suggestions.length ? `Use ${{suggestions[0].label}}` : 'Use Detected Desktop Folder';
+      }}
+      if (suggestions.length && $('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') {{
+        renderPanel('desktop-import-status', {{
+          tone: 'info',
+          eyebrow: 'Suggested folder',
+          title: suggestions[0].label || 'Detected desktop folder',
+          subtitle: 'This folder was detected automatically on this PC.',
+          badge: 'Detected',
+          note: 'Import the folder when you are ready.'
+        }});
+      }}
+      return suggestions;
     }}
-    if (useOldInventoryBtn) {{
-      useOldInventoryBtn.hidden = suggestions.length === 0;
-      useOldInventoryBtn.textContent = suggestions.length ? `Use ${{suggestions[0].label}}` : 'Use Detected Desktop Folder';
-    }}
-    if (suggestions.length && $('desktop-import-status') && $('desktop-import-status').textContent === 'Ready to import.') {{
-      renderPanel('desktop-import-status', {{
-        tone: 'info',
-        eyebrow: 'Suggested folder',
-        title: suggestions[0].label || 'Detected desktop folder',
-        subtitle: 'This folder was detected automatically on this PC.',
-        badge: 'Detected',
-        note: 'Preview the folder before importing so you can confirm the counts.'
-      }});
-    }}
-    return suggestions;
-  }}
-  async function previewSd() {{
-    if (stagedImportToken) {{
-      const preview = await previewStagedFolder();
-      renderPanel('desktop-import-status', {{
-        tone: 'info',
-        eyebrow: 'Preview ready',
-        title: 'Review the staged folder',
-        subtitle: previewSummaryText(preview),
-        badge: 'Step 2 complete',
-        metrics: [
-          ['Items', countText(preview?.inventory_items_found ?? 0)],
-          ['Orders', countText(preview?.orders_found ?? 0)],
-          ['Images', countText(preview?.images_found ?? 0)],
-          ['Transactions', countText(preview?.transaction_rows_found ?? 0)]
-        ],
-        details: importResultDetails(preview)
-      }});
-      return;
-    }}
-    const preview = await json(`/api/desktop/sd/preview?path=${{encodeURIComponent($('desktop-sd-path').value)}}`);
-    renderPanel('desktop-import-status', {{
-      tone: 'info',
-      eyebrow: 'Preview ready',
-      title: 'Review the folder contents',
-      subtitle: previewSummaryText(preview),
-      badge: 'Step 2 of 3',
-      metrics: [
-        ['Items', countText(preview?.inventory_items_found ?? 0)],
-        ['Orders', countText(preview?.orders_found ?? 0)],
-        ['Images', countText(preview?.images_found ?? 0)],
-        ['Transactions', countText(preview?.transaction_rows_found ?? 0)]
-      ],
-      details: importResultDetails(preview)
-    }});
-  }}
   async function importSd() {{
     if (stagedImportToken) {{
       const result = await post('/api/desktop/sd/import', {{token: stagedImportToken, mode: $('desktop-sd-mode').value}});
@@ -3326,7 +3280,7 @@ document.getElementById('category').addEventListener('change',load);document.get
         eyebrow: 'Import complete',
         title: 'Inventory folder imported',
         subtitle: 'The folder was processed and the live data files were updated.',
-        badge: 'Step 3 complete',
+        badge: 'Done',
         metrics: [
           ['Items imported', countText(result?.items_imported ?? 0)],
           ['Items skipped', countText(result?.items_skipped ?? 0)],
@@ -3460,7 +3414,7 @@ document.getElementById('category').addEventListener('change',load);document.get
               title: suggestions[0].label || 'Detected desktop folder',
               subtitle: 'This folder was detected automatically on this PC.',
               badge: 'Detected',
-              note: 'Preview the folder before importing so you can confirm the counts.'
+              note: 'Import the folder when you are ready.'
             }});
           }} else {{
             renderPanel('desktop-import-status', {{
@@ -3482,7 +3436,6 @@ document.getElementById('category').addEventListener('change',load);document.get
         }}
       }});
     }}
-    $('desktop-preview-sd-btn').addEventListener('click', previewSd);
     $('desktop-import-sd-btn').addEventListener('click', importSd);
     $('desktop-backup-btn').addEventListener('click', backup);
     $('desktop-import-backup-btn').addEventListener('click', () => importBackup().catch((e) => renderPanel('desktop-import-status', {{tone:'warning', eyebrow:'Backup import', title:'Import failed', subtitle:e.message, badge:'Check file'}})));
@@ -4178,6 +4131,26 @@ document.getElementById('category').addEventListener('change',load);document.get
             saved_idx = store.find_item_index(new_id)
             store.append_transaction(new_id, "edit_item", qty - previous.qty, qty, f"edited from {original_id}")
             store.append_device_log("item_updated", f"{original_id} updated to {new_id}")
+            return jsonify(store.item_payload(store.items[saved_idx], base_url()))
+
+    @app.route("/api/items/sync-qr", methods=["POST"])
+    def handle_sync_item_qr():
+        item_id = trim_copy(arg("id", arg("original_id")))
+        if not item_id:
+            return json_error(400, "Missing or invalid part number.")
+        with store.lock:
+            idx = store.find_item_index(item_id)
+            if idx < 0:
+                return json_error(404, "Item not found.")
+            previous = ItemRecord(**asdict(store.items[idx]))
+            store.items[idx].qr_code = store.item_url(store.items[idx].id, base_url())
+            store.items[idx].updated_at = current_timestamp()
+            if not store._save_inventory():
+                store.items[idx] = previous
+                return json_error(500, "Failed to persist inventory to disk.")
+            store.append_transaction(item_id, "sync_qr", 0, store.items[idx].qty, "QR updated to current LAN URL")
+            store.append_device_log("item_qr_synced", f"{item_id} QR updated to {store.items[idx].qr_code}")
+            saved_idx = store.find_item_index(item_id)
             return jsonify(store.item_payload(store.items[saved_idx], base_url()))
 
     @app.route("/api/items/remove", methods=["POST"])

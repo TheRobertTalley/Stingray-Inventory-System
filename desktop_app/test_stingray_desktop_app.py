@@ -42,6 +42,16 @@ class DesktopAppTests(unittest.TestCase):
         export = client.get("/api/export").get_data(as_text=True)
         self.assertIn("http://192.168.1.50:8787/item?id=LAN1", export)
 
+    def test_sync_qr_updates_the_stored_qr_code_to_current_lan_url(self):
+        client, _ = self.make_client()
+        client.post("/api/desktop/settings", json={"selected_lan_ip": "192.168.1.50", "configured_network_base_url": "http://192.168.1.50:8787"})
+        client.post("/api/items/add", json={"id": "SYNC1", "part_name": "Sync Item", "qty": "1", "qr_code": "old-qr"})
+        response = client.post("/api/items/sync-qr", json={"id": "SYNC1"})
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["item"]
+        self.assertEqual(item["qr_code"], "http://192.168.1.50:8787/item?id=SYNC1")
+        self.assertEqual(item["qr_link"], "http://192.168.1.50:8787/item?id=SYNC1")
+
     def test_item_update_validates_duplicates_and_saves_fields(self):
         client, _ = self.make_client()
         client.post("/api/items/add", json={"id": "A", "part_name": "A", "qty": "1"})
@@ -384,19 +394,21 @@ class DesktopAppTests(unittest.TestCase):
         self.assertIn('Import Inventory Folder', compat_import_html)
         self.assertIn('Import workflow', import_html)
         self.assertIn('Select a folder', import_html)
+        self.assertNotIn('Preview Folder Import', import_html)
         self.assertIn('status-panel is-empty', import_html)
         self.assertIn('desktop-folder-picker-btn', import_html)
         self.assertIn('desktop-import-sd-btn', import_html)
         self.assertIn('desktop-import-panel', import_html)
         self.assertNotIn('Desktop LAN Access', import_html)
         self.assertNotIn('desktop-lan-panel', import_html)
-        self.assertIn("Views And Tools", inventory_html)
-        self.assertIn("Imports", inventory_html)
+        self.assertIn("Inventory Actions", inventory_html)
         self.assertIn('id="desktop-import-link"', inventory_html)
         self.assertIn("Import Inventory Folder", inventory_html)
         self.assertIn("/import-folder", inventory_html)
         self.assertIn("exactOpen(value)", inventory_html)
         self.assertIn("desktop-edit-panel", item_html)
+        self.assertIn("desktop-sync-qr-btn", item_html)
+        self.assertIn("Sync QR to Current URL", item_html)
         self.assertIn("manual-panel", item_html)
 
     def test_launcher_opens_inventory_screen_by_default(self):
@@ -446,6 +458,7 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(staged["preview"]["inventory_items_found"], 1)
         self.assertEqual(staged["preview"]["orders_found"], 1)
         self.assertEqual(staged["preview"]["images_found"], 1)
+        self.assertNotIn("Preview Folder Import", client.get("/import-folder").get_data(as_text=True))
 
         imported = client.post("/api/desktop/sd/import", json={"token": staged["token"], "mode": "backup_replace"})
         self.assertEqual(imported.status_code, 200)
