@@ -382,10 +382,14 @@ class DesktopAppTests(unittest.TestCase):
         add = client1.post("/api/items/add", json={"id": "SAVE1", "part_name": "Saved Item", "qty": "3"})
         self.assertEqual(add.status_code, 201)
         self.assertTrue(store1.inventory_file.exists())
+        self.assertTrue(store1.state_journal_file.exists())
         self.assertTrue(store1.state_snapshot_file.exists())
         self.assertIn("SAVE1", store1.inventory_file.read_text(encoding="utf-8"))
 
         store1.inventory_file.unlink()
+        store1.state_snapshot_file.unlink()
+        if store1.orders_file.exists():
+            store1.orders_file.unlink()
 
         app2, store2 = create_app(data_dir, firmware_ino=firmware_ino, bind_host="0.0.0.0", port=8787)
         client2 = app2.test_client()
@@ -395,8 +399,9 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(item["qty"], 3)
         self.assertTrue(store2.inventory_file.exists())
         self.assertTrue(status["state_snapshot_available"])
+        self.assertTrue(status["state_journal_available"])
         self.assertTrue(status["last_saved_at"])
-        self.assertEqual(status["last_saved_reason"], "inventory")
+        self.assertIn(status["last_saved_reason"], {"inventory", "journal_recovery"})
 
     def test_existing_ui_gets_desktop_settings_and_item_edit_controls(self):
         client, _ = self.make_client()
@@ -437,6 +442,8 @@ class DesktopAppTests(unittest.TestCase):
         self.assertIn("desktop-sync-qr-btn", item_html)
         self.assertIn("Sync QR to Current URL", item_html)
         self.assertIn("manual-panel", item_html)
+        self.assertIn("desktop-save-badge", item_html)
+        self.assertIn("desktop-main-save-badge", item_html)
 
     def test_launcher_opens_inventory_screen_by_default(self):
         client, store = self.make_client()

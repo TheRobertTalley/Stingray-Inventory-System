@@ -37,7 +37,7 @@ Default LAN behavior:
 Default data directory:
 
 - `C:\ProgramData\Inventory\data`
-- Every inventory or order change writes immediately to disk and also updates a small recovery snapshot in `C:\ProgramData\Inventory\data\desktop_state.json`.
+- Every inventory or order change writes immediately to disk, updates a visible saved badge in the UI, and also writes both a recovery snapshot and a write-ahead journal in `C:\ProgramData\Inventory\data\desktop_state.json` and `C:\ProgramData\Inventory\data\desktop_journal.jsonl`.
 
 Legacy data migration:
 

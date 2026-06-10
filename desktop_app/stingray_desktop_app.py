@@ -45,6 +45,7 @@ ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 APP_CONFIG_FILE = "desktop_config.json"
 STATE_SNAPSHOT_FILE = "desktop_state.json"
 STATE_SNAPSHOT_TMP_FILE = "desktop_state.tmp"
+STATE_JOURNAL_FILE = "desktop_journal.jsonl"
 FIREWALL_RULE_NAME = "Inventory LAN"
 LEGACY_FIREWALL_RULE_NAME = "Stingray Inventory Desktop LAN"
 SYSTEM_TASK_NAME = "Inventory (System Startup)"
@@ -580,6 +581,7 @@ class DesktopStore:
         self.time_log_file = self.logs_dir / "time_log.csv"
         self.state_snapshot_file = self.data_dir / STATE_SNAPSHOT_FILE
         self.state_snapshot_tmp_file = self.data_dir / STATE_SNAPSHOT_TMP_FILE
+        self.state_journal_file = self.data_dir / STATE_JOURNAL_FILE
         self.cloud_config_file = self.config_dir / "cloud_backup.cfg"
         self.cloud_config_tmp_file = self.config_dir / "cloud_backup.tmp"
         self.google_state_file = self.config_dir / "google_drive_state.cfg"
@@ -598,12 +600,14 @@ class DesktopStore:
         self.pending_import_uploads: dict[str, dict[str, Any]] = {}
         self.last_state_save_at = ""
         self.last_state_save_reason = ""
+        self.last_journal_entry_at = ""
         self.index_html, self.item_html = self._load_ui_assets(firmware_ino)
         self._ensure_data_files()
         self._load_app_config(bind_host, port)
         self._load_cloud_config()
         self._load_google_state()
         self._load_inventory()
+        self._recover_state_journal()
         self._recover_state_snapshot()
         self.append_device_log("boot", "Desktop inventory service started.")
 
@@ -823,28 +827,10 @@ class DesktopStore:
             self.items.sort(key=lambda item: normalize_lookup_value(item.id))
 
     def _save_inventory(self) -> bool:
+        if not self._append_state_journal("inventory"):
+            self.append_device_log("state_journal_failed", "Inventory changed, but the write-ahead journal could not be updated.")
         with self.lock:
-            lines = [INVENTORY_HEADER]
-            for item in self.items:
-                lines.append(
-                    "|".join(
-                        [
-                            sanitize_field(item.id),
-                            sanitize_field(normalize_category(item.category)),
-                            sanitize_field(item.part_name),
-                            sanitize_field(item.qr_code),
-                            sanitize_field(item.color),
-                            sanitize_field(item.material),
-                            str(item.qty),
-                            sanitize_field(item.image_ref),
-                            sanitize_field(item.bom_product),
-                            str(item.bom_qty),
-                            sanitize_field(item.updated_at),
-                        ]
-                    )
-            )
-            self.inventory_tmp_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            self.inventory_tmp_file.replace(self.inventory_file)
+            self._write_inventory_file(self.items)
             if not self._save_state_snapshot("inventory"):
                 self.append_device_log("state_snapshot_failed", "Inventory data saved, but the autosave snapshot could not be updated.")
             return True
@@ -872,11 +858,123 @@ class DesktopStore:
         trimmed = trim_copy(payload)
         if not trimmed:
             return False
-        self.orders_tmp_file.write_text(trimmed, encoding="utf-8")
-        self.orders_tmp_file.replace(self.orders_file)
+        if not self._append_state_journal("orders"):
+            self.append_device_log("state_journal_failed", "Orders changed, but the write-ahead journal could not be updated.")
+        self._write_orders_payload(trimmed)
         if not self._save_state_snapshot("orders"):
             self.append_device_log("state_snapshot_failed", "Orders data saved, but the autosave snapshot could not be updated.")
         return True
+
+    def _write_inventory_file(self, items: list[ItemRecord]) -> None:
+        lines = [INVENTORY_HEADER]
+        for item in items:
+            lines.append(
+                "|".join(
+                    [
+                        sanitize_field(item.id),
+                        sanitize_field(normalize_category(item.category)),
+                        sanitize_field(item.part_name),
+                        sanitize_field(item.qr_code),
+                        sanitize_field(item.color),
+                        sanitize_field(item.material),
+                        str(item.qty),
+                        sanitize_field(item.image_ref),
+                        sanitize_field(item.bom_product),
+                        str(item.bom_qty),
+                        sanitize_field(item.updated_at),
+                    ]
+                )
+            )
+        self.inventory_tmp_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.inventory_tmp_file.replace(self.inventory_file)
+
+    def _write_orders_payload(self, payload: str) -> None:
+        self.orders_tmp_file.write_text(payload, encoding="utf-8")
+        self.orders_tmp_file.replace(self.orders_file)
+
+    def _state_journal_entry(self, reason: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "saved_at": current_timestamp(),
+            "reason": reason,
+            "app_name": APP_DISPLAY_NAME,
+            "data_dir": str(self.data_dir),
+            "inventory": [asdict(item) for item in self.items],
+            "orders_payload": self._load_orders_payload(),
+        }
+
+    def _append_state_journal(self, reason: str) -> bool:
+        try:
+            entry = self._state_journal_entry(reason)
+            line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+            self.state_journal_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.state_journal_file.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(line + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self.last_state_save_at = entry["saved_at"]
+            self.last_state_save_reason = reason
+            self.last_journal_entry_at = entry["saved_at"]
+            return True
+        except OSError:
+            return False
+
+    def _read_last_state_journal_entry(self) -> dict[str, Any] | None:
+        if not self.state_journal_file.exists():
+            return None
+        try:
+            lines = self.state_journal_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return None
+        for raw in reversed(lines):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def _recover_state_journal(self) -> None:
+        entry = self._read_last_state_journal_entry()
+        if not entry:
+            return
+
+        recovered = False
+        journal_reason = trim_copy(str(entry.get("reason", "write-ahead journal"))) or "write-ahead journal"
+        journal_saved_at = trim_copy(str(entry.get("saved_at", "")))
+        if journal_saved_at:
+            self.last_state_save_at = journal_saved_at
+            self.last_journal_entry_at = journal_saved_at
+            self.last_state_save_reason = journal_reason
+
+        inventory_rows = entry.get("inventory")
+        if isinstance(inventory_rows, list):
+            restored_items: list[ItemRecord] = []
+            for row in inventory_rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    restored_items.append(ItemRecord(**row))
+                except TypeError:
+                    continue
+            if restored_items:
+                self.items = sorted(restored_items, key=lambda item: normalize_lookup_value(item.id))
+                self._write_inventory_file(self.items)
+                self.append_device_log("journal_recovered", f"Recovered {len(restored_items)} inventory items from {journal_reason}.")
+                recovered = True
+
+        orders_payload = entry.get("orders_payload")
+        if isinstance(orders_payload, str) and trim_copy(orders_payload):
+            self._write_orders_payload(orders_payload)
+            self.append_device_log("journal_recovered", f"Recovered orders from {journal_reason}.")
+            recovered = True
+
+        if recovered:
+            self._save_state_snapshot("journal_recovery")
 
     def _load_state_snapshot(self) -> dict[str, Any] | None:
         if not self.state_snapshot_file.exists():
@@ -912,7 +1010,7 @@ class DesktopStore:
             return
         if self.orders_file.exists() and trim_copy(self._load_orders_payload()):
             return
-        self._save_orders_payload(trimmed)
+        self._write_orders_payload(trimmed)
         self.append_device_log("state_recovered", f"Recovered orders from {snapshot_reason}.")
 
     def _recover_state_snapshot(self) -> None:
@@ -938,7 +1036,7 @@ class DesktopStore:
                     continue
             if restored_items:
                 self.items = sorted(restored_items, key=lambda item: normalize_lookup_value(item.id))
-                self._save_inventory()
+                self._write_inventory_file(self.items)
                 self.append_device_log("state_recovered", f"Recovered {len(restored_items)} inventory items from {snapshot_reason}.")
 
         orders_payload = snapshot.get("orders_payload")
@@ -1716,6 +1814,8 @@ class DesktopStore:
             "last_saved_reason": self.last_state_save_reason,
             "state_snapshot_file": str(self.state_snapshot_file),
             "state_snapshot_available": self.state_snapshot_file.exists(),
+            "state_journal_file": str(self.state_journal_file),
+            "state_journal_available": self.state_journal_file.exists(),
             "brand_name": self.cloud_config.brand_name,
             "brand_logo_ref": self.cloud_config.brand_logo_ref,
             "backup_mode": self.cloud_config.backup_mode,
@@ -2560,6 +2660,94 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
 
     def desktop_item_html() -> str:
         html = store.item_html
+        if "</style>" in html and "desktop-save-badge" not in html:
+            html = html.replace(
+                "</style>",
+                """
+    #desktop-save-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.38rem 0.72rem;
+      border-radius: 999px;
+      background: rgba(18, 153, 99, 0.12);
+      color: #0f5f3a;
+      border: 1px solid rgba(18, 153, 99, 0.28);
+      font-size: 0.88rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    #desktop-save-badge.saving {
+      background: rgba(185, 133, 0, 0.12);
+      color: #7a5200;
+      border-color: rgba(185, 133, 0, 0.28);
+    }
+    #desktop-save-badge.error {
+      background: rgba(190, 44, 44, 0.12);
+      color: #9d2020;
+      border-color: rgba(190, 44, 44, 0.28);
+    }
+    .desktop-save-row {
+      display: flex;
+      justify-content: flex-end;
+      margin: 0.75rem 0 0.1rem;
+    }
+    #desktop-main-save-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.38rem 0.72rem;
+      border-radius: 999px;
+      background: rgba(18, 153, 99, 0.12);
+      color: #0f5f3a;
+      border: 1px solid rgba(18, 153, 99, 0.28);
+      font-size: 0.88rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    #desktop-main-save-badge.saving {
+      background: rgba(185, 133, 0, 0.12);
+      color: #7a5200;
+      border-color: rgba(185, 133, 0, 0.28);
+    }
+    #desktop-main-save-badge.error {
+      background: rgba(190, 44, 44, 0.12);
+      color: #9d2020;
+      border-color: rgba(190, 44, 44, 0.28);
+    }
+</style>""",
+                1,
+            )
+        html = html.replace(
+            '<div id="status" class="status ok">Ready.</div>',
+            '<div class="desktop-save-row"><span id="desktop-main-save-badge" class="status-badge">Saved to disk</span></div>\n    <div id="status" class="status ok">Ready.</div>',
+            1,
+        )
+        html = html.replace(
+            "    const statusEl = document.getElementById('status');\n\n    function setStatus(message, isError = false) {\n      statusEl.textContent = message;\n      statusEl.className = isError ? 'status error' : 'status ok';\n    }\n",
+            "    const statusEl = document.getElementById('status');\n    const saveBadgeEl = document.getElementById('desktop-main-save-badge');\n\n    function setStatus(message, isError = false) {\n      statusEl.textContent = message;\n      statusEl.className = isError ? 'status error' : 'status ok';\n    }\n\n    function setSaveBadge(message, tone = 'saved') {\n      if (!saveBadgeEl) {\n        return;\n      }\n\n      saveBadgeEl.textContent = message || 'Saved to disk';\n      saveBadgeEl.className = tone === 'saved' ? 'status-badge' : `status-badge ${tone}`;\n    }\n",
+            1,
+        )
+        html = html.replace(
+            "          renderBomComponents(data.item, data.bom_components || []);\n\n          if (pendingAdjustDelta) {\n",
+            "          renderBomComponents(data.item, data.bom_components || []);\n\n          if (pendingAdjustDelta) {\n            setSaveBadge('Saving changes...', 'saving');\n",
+            1,
+        )
+        html = html.replace(
+            "          } else {\n            setStatus(`Inventory changed by ${formatDelta(deltaToSend)}.`);\n          }\n",
+            "          } else {\n            setStatus(`Inventory changed by ${formatDelta(deltaToSend)}.`);\n            setSaveBadge('Saved to disk', 'saved');\n          }\n",
+            1,
+        )
+        html = html.replace(
+            "      renderBomComponents(data.item, data.bom_components || []);\n    }\n",
+            "      renderBomComponents(data.item, data.bom_components || []);\n      setSaveBadge('Saved to disk', 'saved');\n    }\n",
+            1,
+        )
+        html = html.replace(
+            "        await loadItem();\n        setStatus('Item loaded.');\n",
+            "        await loadItem();\n        setStatus('Item loaded.');\n        setSaveBadge('Saved to disk', 'saved');\n",
+            1,
+        )
         panel = r'''
       <section class="info-panel" id="desktop-edit-panel">
         <h2>Edit Item</h2>
@@ -2581,6 +2769,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
           <button id="desktop-upload-image-btn" type="button" class="secondary">Upload/Replace Image</button>
           <button id="desktop-remove-image-btn" type="button" class="secondary">Remove Image</button>
         </div>
+        <div class="desktop-save-row"><span id="desktop-save-badge" class="status-badge">Saved to disk</span></div>
         <div id="desktop-edit-status" class="status"></div>
       </section>
 '''
@@ -2614,6 +2803,18 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       const el = $('desktop-edit-status');
       if (el) { el.textContent = text || ''; el.className = bad ? 'status error' : 'status'; }
     }
+    function setSaveBadge(message, tone) {
+      const el = $('desktop-save-badge');
+      if (!el) return;
+      el.textContent = message || 'Saved to disk';
+      el.className = tone ? `status-badge ${tone}` : 'status-badge';
+    }
+    function setMainSaveBadge(message, tone) {
+      const el = $('desktop-main-save-badge');
+      if (!el) return;
+      el.textContent = message || 'Saved to disk';
+      el.className = tone ? `status-badge ${tone}` : 'status-badge';
+    }
   async function loadEdit() {
     if (!$('desktop-edit-panel') || !currentId) return;
     const payload = await json(`/api/item?id=${encodeURIComponent(currentId)}`);
@@ -2646,6 +2847,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       currentId = saved.item.id;
       history.replaceState(null, '', `/item?id=${encodeURIComponent(currentId)}`);
       status('Item saved.');
+      setSaveBadge(`Saved ${saved.item.updated_at || 'to disk'}`, 'saved');
       setTimeout(() => window.location.reload(), 500);
     }
     async function syncQr() {
@@ -2661,11 +2863,13 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     form.append('image', file);
     await json('/api/items/image', {method:'POST', body: form});
     status('Image saved.');
+    setSaveBadge('Saved to disk', 'saved');
     setTimeout(() => window.location.reload(), 500);
   }
   async function removeImage() {
     await json('/api/items/image', {method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: currentId})});
     status('Image removed.');
+    setSaveBadge('Saved to disk', 'saved');
     setTimeout(() => window.location.reload(), 500);
   }
     document.addEventListener('DOMContentLoaded', () => {
@@ -2674,21 +2878,25 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         const message = String(e && e.message ? e.message : e || '');
         if (message.includes('already exists')) {
           status('That part number is already in use. Choose a different one, or open the existing item.', true);
+          setSaveBadge('Conflict needs attention', 'error');
           return;
         }
         status(message, true);
+        setSaveBadge('Save failed', 'error');
       }));
       $('desktop-sync-qr-btn').addEventListener('click', () => syncQr().catch((e) => {
         const message = String(e && e.message ? e.message : e || '');
         if (message.includes('already exists')) {
           status('That part number is already in use. Choose a different one, or open the existing item.', true);
+          setSaveBadge('Conflict needs attention', 'error');
           return;
         }
         status(message, true);
+        setSaveBadge('Save failed', 'error');
       }));
-      $('desktop-upload-image-btn').addEventListener('click', () => uploadImage().catch((e) => status(e.message, true)));
-      $('desktop-remove-image-btn').addEventListener('click', () => removeImage().catch((e) => status(e.message, true)));
-      loadEdit().catch((e) => status(e.message, true));
+      $('desktop-upload-image-btn').addEventListener('click', () => uploadImage().catch((e) => { status(e.message, true); setSaveBadge('Save failed', 'error'); }));
+      $('desktop-remove-image-btn').addEventListener('click', () => removeImage().catch((e) => { status(e.message, true); setSaveBadge('Save failed', 'error'); }));
+      loadEdit().then(() => setSaveBadge(`Saved ${currentItem && currentItem.updated_at ? currentItem.updated_at : 'to disk'}`, 'saved')).catch((e) => { status(e.message, true); setSaveBadge('Save failed', 'error'); });
     });
   })();
 </script>
