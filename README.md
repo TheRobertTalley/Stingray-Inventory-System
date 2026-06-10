@@ -44,6 +44,7 @@ The desktop build is Ethernet/LAN-first on Windows; there is no Wi-Fi scanning w
 Backups are portable between computers and restore inventory, orders, logs, and images without carrying over the old PC's LAN settings.
 The desktop app can also import an existing inventory folder from the Windows PC, such as `C:\Users\TALLEY\Desktop\old inventory`, through the dedicated import page.
 The import page supports typing a path, choosing a folder in Windows, or dragging the folder onto the drop zone.
+Desktop inventory changes autosave immediately and write a recovery snapshot in `C:\ProgramData\Inventory\data` so a reboot does not discard recent edits.
 
 - Desktop entry point: `desktop_app/stingray_desktop_app.py`
 - One-command setup/run on Windows: `desktop_app/install_and_run.ps1`

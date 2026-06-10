@@ -43,6 +43,8 @@ LEGACY_PROGRAM_DATA_ROOT_NAME = "StingrayInventoryDesktop"
 DEFAULT_CATEGORY = "part"
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 APP_CONFIG_FILE = "desktop_config.json"
+STATE_SNAPSHOT_FILE = "desktop_state.json"
+STATE_SNAPSHOT_TMP_FILE = "desktop_state.tmp"
 FIREWALL_RULE_NAME = "Inventory LAN"
 LEGACY_FIREWALL_RULE_NAME = "Stingray Inventory Desktop LAN"
 SYSTEM_TASK_NAME = "Inventory (System Startup)"
@@ -576,6 +578,8 @@ class DesktopStore:
         self.transaction_file = self.data_dir / "transactions.csv"
         self.device_log_file = self.logs_dir / "device_log.csv"
         self.time_log_file = self.logs_dir / "time_log.csv"
+        self.state_snapshot_file = self.data_dir / STATE_SNAPSHOT_FILE
+        self.state_snapshot_tmp_file = self.data_dir / STATE_SNAPSHOT_TMP_FILE
         self.cloud_config_file = self.config_dir / "cloud_backup.cfg"
         self.cloud_config_tmp_file = self.config_dir / "cloud_backup.tmp"
         self.google_state_file = self.config_dir / "google_drive_state.cfg"
@@ -592,12 +596,15 @@ class DesktopStore:
         self.google_state = GoogleState()
         self.app_config = DesktopConfig(bind_host=bind_host, port=port)
         self.pending_import_uploads: dict[str, dict[str, Any]] = {}
+        self.last_state_save_at = ""
+        self.last_state_save_reason = ""
         self.index_html, self.item_html = self._load_ui_assets(firmware_ino)
         self._ensure_data_files()
         self._load_app_config(bind_host, port)
         self._load_cloud_config()
         self._load_google_state()
         self._load_inventory()
+        self._recover_state_snapshot()
         self.append_device_log("boot", "Desktop inventory service started.")
 
     def _mac_address_string(self) -> str:
@@ -835,9 +842,11 @@ class DesktopStore:
                             sanitize_field(item.updated_at),
                         ]
                     )
-                )
+            )
             self.inventory_tmp_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
             self.inventory_tmp_file.replace(self.inventory_file)
+            if not self._save_state_snapshot("inventory"):
+                self.append_device_log("state_snapshot_failed", "Inventory data saved, but the autosave snapshot could not be updated.")
             return True
 
     def _load_orders_payload(self) -> str:
@@ -865,7 +874,76 @@ class DesktopStore:
             return False
         self.orders_tmp_file.write_text(trimmed, encoding="utf-8")
         self.orders_tmp_file.replace(self.orders_file)
+        if not self._save_state_snapshot("orders"):
+            self.append_device_log("state_snapshot_failed", "Orders data saved, but the autosave snapshot could not be updated.")
         return True
+
+    def _load_state_snapshot(self) -> dict[str, Any] | None:
+        if not self.state_snapshot_file.exists():
+            return None
+        try:
+            payload = json.loads(self.state_snapshot_file.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _save_state_snapshot(self, reason: str) -> bool:
+        try:
+            payload = {
+                "schema_version": 1,
+                "saved_at": current_timestamp(),
+                "reason": reason,
+                "app_name": APP_DISPLAY_NAME,
+                "data_dir": str(self.data_dir),
+                "inventory": [asdict(item) for item in self.items],
+                "orders_payload": self._load_orders_payload(),
+            }
+            self.state_snapshot_tmp_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            self.state_snapshot_tmp_file.replace(self.state_snapshot_file)
+            self.last_state_save_at = payload["saved_at"]
+            self.last_state_save_reason = reason
+            return True
+        except OSError:
+            return False
+
+    def _restore_orders_payload_if_missing(self, orders_payload: str, snapshot_reason: str) -> None:
+        trimmed = trim_copy(orders_payload)
+        if not trimmed:
+            return
+        if self.orders_file.exists() and trim_copy(self._load_orders_payload()):
+            return
+        self._save_orders_payload(trimmed)
+        self.append_device_log("state_recovered", f"Recovered orders from {snapshot_reason}.")
+
+    def _recover_state_snapshot(self) -> None:
+        snapshot = self._load_state_snapshot()
+        if not snapshot:
+            return
+
+        snapshot_reason = trim_copy(str(snapshot.get("reason", "autosave snapshot"))) or "autosave snapshot"
+        snapshot_saved_at = trim_copy(str(snapshot.get("saved_at", "")))
+        if snapshot_saved_at:
+            self.last_state_save_at = snapshot_saved_at
+            self.last_state_save_reason = snapshot_reason
+
+        inventory_rows = snapshot.get("inventory")
+        if not self.items and isinstance(inventory_rows, list):
+            restored_items: list[ItemRecord] = []
+            for row in inventory_rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    restored_items.append(ItemRecord(**row))
+                except TypeError:
+                    continue
+            if restored_items:
+                self.items = sorted(restored_items, key=lambda item: normalize_lookup_value(item.id))
+                self._save_inventory()
+                self.append_device_log("state_recovered", f"Recovered {len(restored_items)} inventory items from {snapshot_reason}.")
+
+        orders_payload = snapshot.get("orders_payload")
+        if isinstance(orders_payload, str):
+            self._restore_orders_payload_if_missing(orders_payload, snapshot_reason)
 
     def _merge_orders_from_file(self, src: Path) -> tuple[int, int, int]:
         incoming = self._read_orders_from_file(src)
@@ -1634,6 +1712,10 @@ class DesktopStore:
             "backups_dir": str(self.backups_dir),
             "logs_dir": str(self.logs_dir),
             "config_dir": str(self.config_dir),
+            "last_saved_at": self.last_state_save_at,
+            "last_saved_reason": self.last_state_save_reason,
+            "state_snapshot_file": str(self.state_snapshot_file),
+            "state_snapshot_available": self.state_snapshot_file.exists(),
             "brand_name": self.cloud_config.brand_name,
             "brand_logo_ref": self.cloud_config.brand_logo_ref,
             "backup_mode": self.cloud_config.backup_mode,

@@ -371,6 +371,33 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue((store.cloud_config_file).exists())
         self.assertTrue((store.logs_dir / "device_log.csv").exists())
 
+    def test_inventory_changes_autosave_and_recover_after_restart(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        firmware_ino = Path(__file__).resolve().parents[1] / "firmware" / "StingrayInventoryESP32" / "StingrayInventoryESP32.ino"
+        data_dir = Path(tmp.name) / "ProgramData" / "Inventory" / "data"
+
+        app1, store1 = create_app(data_dir, firmware_ino=firmware_ino, bind_host="0.0.0.0", port=8787)
+        client1 = app1.test_client()
+        add = client1.post("/api/items/add", json={"id": "SAVE1", "part_name": "Saved Item", "qty": "3"})
+        self.assertEqual(add.status_code, 201)
+        self.assertTrue(store1.inventory_file.exists())
+        self.assertTrue(store1.state_snapshot_file.exists())
+        self.assertIn("SAVE1", store1.inventory_file.read_text(encoding="utf-8"))
+
+        store1.inventory_file.unlink()
+
+        app2, store2 = create_app(data_dir, firmware_ino=firmware_ino, bind_host="0.0.0.0", port=8787)
+        client2 = app2.test_client()
+        item = client2.get("/api/item?id=SAVE1").get_json()["item"]
+        status = client2.get("/api/status").get_json()
+
+        self.assertEqual(item["qty"], 3)
+        self.assertTrue(store2.inventory_file.exists())
+        self.assertTrue(status["state_snapshot_available"])
+        self.assertTrue(status["last_saved_at"])
+        self.assertEqual(status["last_saved_reason"], "inventory")
+
     def test_existing_ui_gets_desktop_settings_and_item_edit_controls(self):
         client, _ = self.make_client()
         client.post("/api/items/add", json={"id": "UI1", "part_name": "UI Item", "qty": "1"})
