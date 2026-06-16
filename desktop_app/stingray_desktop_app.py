@@ -2774,7 +2774,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       </section>
 '''
         marker = '    <section class="manual-panel">'
-        if marker in html and "desktop-edit-panel" not in html:
+        if marker in html and 'id="desktop-edit-panel"' not in html:
             html = html.replace(marker, panel + "\n" + marker)
         script = r'''
 <script>

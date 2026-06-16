@@ -444,6 +444,9 @@ class DesktopAppTests(unittest.TestCase):
         self.assertIn("manual-panel", item_html)
         self.assertIn("desktop-save-badge", item_html)
         self.assertIn("desktop-main-save-badge", item_html)
+        self.assertIn("[hidden]", item_html)
+        self.assertIn("#desktop-edit-panel", item_html)
+        self.assertIn("order: -1", item_html)
 
     def test_launcher_opens_inventory_screen_by_default(self):
         client, store = self.make_client()

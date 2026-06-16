@@ -1528,6 +1528,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     * { box-sizing: border-box; }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       font-family: "Segoe UI", Tahoma, sans-serif;
@@ -4766,6 +4770,10 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
 
     * { box-sizing: border-box; }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       background:
@@ -5237,6 +5245,10 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
         grid-template-columns: 1fr;
       }
 
+      .quantity-shell {
+        order: -1;
+      }
+
       .info-panel {
         grid-template-columns: 1fr;
       }
@@ -5266,6 +5278,10 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
     @media (max-width: 640px) {
       body {
         padding: 0.8rem;
+      }
+
+      #desktop-edit-panel {
+        display: none !important;
       }
 
       .card {
