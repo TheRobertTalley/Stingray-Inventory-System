@@ -66,6 +66,50 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(ok.get_json()["item"]["id"], "A2")
         self.assertEqual(ok.get_json()["item"]["color"], "blue")
 
+    def test_kit_creation_links_parts_and_subkits_with_recursive_stock_updates(self):
+        client, _ = self.make_client()
+        self.assertEqual(client.post("/api/items/add", json={"id": "BASE", "part_name": "Base Part", "qty": "50"}).status_code, 201)
+        self.assertEqual(client.post("/api/items/add", json={"id": "SUBPART", "part_name": "Sub Part", "qty": "50"}).status_code, 201)
+        self.assertEqual(
+            client.post(
+                "/api/items/add",
+                json={"id": "SUBKIT", "category": "kit", "part_name": "Sub Kit", "qty": "0", "components": "SUBPART|2"},
+            ).status_code,
+            201,
+        )
+        kit = client.post(
+            "/api/items/add",
+            json={"id": "KIT", "category": "kit", "part_name": "Main Kit", "qty": "2", "components": "BASE|3\nSUBKIT|1"},
+        )
+        self.assertEqual(kit.status_code, 201)
+
+        kit_payload = client.get("/api/item?id=KIT").get_json()
+        self.assertEqual({component["id"] for component in kit_payload["bom_components"]}, {"BASE", "SUBKIT"})
+        self.assertEqual(client.get("/api/item?id=BASE").get_json()["item"]["qty"], 56)
+        self.assertEqual(client.get("/api/item?id=SUBKIT").get_json()["item"]["qty"], 2)
+        self.assertEqual(client.get("/api/item?id=SUBPART").get_json()["item"]["qty"], 54)
+
+        adjusted = client.post("/api/items/adjust", json={"id": "KIT", "delta": "-1"})
+        self.assertEqual(adjusted.status_code, 200)
+        self.assertEqual(client.get("/api/item?id=KIT").get_json()["item"]["qty"], 1)
+        self.assertEqual(client.get("/api/item?id=BASE").get_json()["item"]["qty"], 53)
+        self.assertEqual(client.get("/api/item?id=SUBKIT").get_json()["item"]["qty"], 1)
+        self.assertEqual(client.get("/api/item?id=SUBPART").get_json()["item"]["qty"], 52)
+
+    def test_order_fulfillment_deducts_linked_kit_components(self):
+        client, _ = self.make_client()
+        client.post("/api/items/add", json={"id": "PART", "part_name": "Part", "qty": "20"})
+        client.post("/api/items/add", json={"id": "KIT", "category": "kit", "part_name": "Kit", "qty": "2", "components": "PART|2"})
+
+        fulfilled = client.post(
+            "/api/orders/fulfill",
+            json={"order_number": "ORD-KIT", "plan": "KIT|1", "orders_payload": '{"orders":[]}'},
+        )
+        self.assertEqual(fulfilled.status_code, 200)
+        self.assertEqual(fulfilled.get_json()["units_removed"], 3)
+        self.assertEqual(client.get("/api/item?id=KIT").get_json()["item"]["qty"], 1)
+        self.assertEqual(client.get("/api/item?id=PART").get_json()["item"]["qty"], 22)
+
     def test_item_image_add_replace_remove(self):
         client, _ = self.make_client()
         client.post("/api/items/add", json={"id": "IMG", "part_name": "Image Item", "qty": "1"})
@@ -437,8 +481,12 @@ class DesktopAppTests(unittest.TestCase):
         self.assertIn('id="desktop-import-link"', inventory_html)
         self.assertIn("Import Inventory Folder", inventory_html)
         self.assertIn("/import-folder", inventory_html)
+        self.assertIn("Kit components", inventory_html)
+        self.assertIn("data-draft-component-select", inventory_html)
+        self.assertIn("Add Component", inventory_html)
         self.assertIn("exactOpen(value)", inventory_html)
         self.assertIn("desktop-edit-panel", item_html)
+        self.assertIn('<select id="desktop-edit-bom-product">', item_html)
         self.assertIn("desktop-sync-qr-btn", item_html)
         self.assertIn("Sync QR to Current URL", item_html)
         self.assertIn("manual-panel", item_html)

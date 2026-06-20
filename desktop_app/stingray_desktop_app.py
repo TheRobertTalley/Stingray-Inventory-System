@@ -1245,6 +1245,15 @@ class DesktopStore:
                 return idx
         return -1
 
+    def find_item_index_by_lookup(self, value: str) -> int:
+        target = normalize_lookup_value(value)
+        if not target:
+            return -1
+        for idx, item in enumerate(self.items):
+            if normalize_lookup_value(item.id) == target or normalize_lookup_value(item.part_name) == target:
+                return idx
+        return -1
+
     def item_url(self, item_id: str, base_url: str) -> str:
         return f"{base_url}/item?id={quote(item_id)}"
 
@@ -1260,13 +1269,144 @@ class DesktopStore:
     def item_can_have_bom(self, item: ItemRecord) -> bool:
         return normalize_category(item.category) in {"product", "kit"}
 
+    def item_can_be_bom_component(self, item: ItemRecord) -> bool:
+        return normalize_category(item.category) in {"part", "kit"}
+
     def is_bom_component_of(self, component: ItemRecord, parent: ItemRecord) -> bool:
-        if normalize_category(component.category) != "part":
+        if not self.item_can_be_bom_component(component):
+            return False
+        if normalize_lookup_value(component.id) == normalize_lookup_value(parent.id):
             return False
         component_parent = normalize_lookup_value(component.bom_product)
         parent_id = normalize_lookup_value(parent.id)
         parent_name = normalize_lookup_value(parent.part_name)
         return bool(component_parent) and (component_parent == parent_id or component_parent == parent_name)
+
+    def bom_assignment_error(self, component_id: str, component_category: str, parent_lookup: str) -> str:
+        parent_text = trim_copy(parent_lookup)
+        if not parent_text:
+            return ""
+        if normalize_category(component_category) not in {"part", "kit"}:
+            return "Only parts and kits can be assigned to a parent product or kit."
+        parent_idx = self.find_item_index_by_lookup(parent_text)
+        if parent_idx < 0:
+            return "Parent product or kit must match an existing product or kit."
+        parent = self.items[parent_idx]
+        if not self.item_can_have_bom(parent):
+            return "Parent item must be a product or kit."
+        component_key = normalize_lookup_value(component_id)
+        parent_key = normalize_lookup_value(parent.id)
+        if component_key and component_key == parent_key:
+            return "An item cannot contain itself as a component."
+        seen = {component_key}
+        cursor = parent
+        while trim_copy(cursor.bom_product):
+            cursor_idx = self.find_item_index_by_lookup(cursor.bom_product)
+            if cursor_idx < 0:
+                break
+            cursor = self.items[cursor_idx]
+            cursor_key = normalize_lookup_value(cursor.id)
+            if cursor_key in seen:
+                return "This BOM link would create a component cycle."
+            seen.add(cursor_key)
+        return ""
+
+    def parse_component_links(self, raw_components: str) -> tuple[list[tuple[str, int]], str]:
+        components: dict[str, tuple[str, int]] = {}
+        for raw in (raw_components or "").replace("\r", "\n").split("\n"):
+            line = trim_copy(raw)
+            if not line:
+                continue
+            fields = split_pipe_line(line)
+            if len(fields) < 2:
+                return [], "Invalid component line format."
+            component_id = trim_copy(sanitize_field(fields[0]))
+            qty = parse_int(fields[1])
+            if not component_id:
+                return [], "Component part number is required."
+            if qty is None or qty <= 0:
+                return [], "Component quantity must be a positive integer."
+            idx = self.find_item_index(component_id)
+            if idx < 0:
+                return [], f"Component not found: {component_id}"
+            component = self.items[idx]
+            if not self.item_can_be_bom_component(component):
+                return [], f"Only parts and kits can be components: {component.id}"
+            key = normalize_lookup_value(component.id)
+            current = components.get(key)
+            components[key] = (component.id, qty + (current[1] if current else 0))
+        return list(components.values()), ""
+
+    def apply_component_links(self, parent: ItemRecord, components: list[tuple[str, int]]) -> str:
+        if not components:
+            return ""
+        if not self.item_can_have_bom(parent):
+            return "Only products and kits can own BOM components."
+        parent_key = normalize_lookup_value(parent.id)
+        for component_id, qty in components:
+            idx = self.find_item_index(component_id)
+            if idx < 0:
+                return f"Component not found: {component_id}"
+            component = self.items[idx]
+            if normalize_lookup_value(component.id) == parent_key:
+                return "An item cannot contain itself as a component."
+            error = self.bom_assignment_error(component.id, component.category, parent.id)
+            if error:
+                return error
+            component.bom_product = parent.id
+            component.bom_qty = qty
+            component.updated_at = current_timestamp()
+        return ""
+
+    def collect_linked_stock_deltas(
+        self,
+        item: ItemRecord,
+        delta: int,
+        totals: dict[str, int],
+        path: set[str] | None = None,
+    ) -> None:
+        if delta == 0:
+            return
+        path = set(path or set())
+        item_key = normalize_lookup_value(item.id)
+        if item_key in path:
+            raise ValueError("BOM cycle detected while applying linked inventory changes.")
+        path.add(item_key)
+        totals[item_key] = totals.get(item_key, 0) + delta
+        if not self.item_can_have_bom(item):
+            return
+        for component in self.items:
+            if not self.is_bom_component_of(component, item):
+                continue
+            component_qty = max(0, int(component.bom_qty or 0))
+            if component_qty <= 0:
+                continue
+            self.collect_linked_stock_deltas(component, delta * component_qty, totals, path)
+
+    def plan_linked_stock_changes(self, roots: list[tuple[ItemRecord, int]]) -> tuple[dict[str, int], str]:
+        totals: dict[str, int] = {}
+        try:
+            for item, delta in roots:
+                self.collect_linked_stock_deltas(item, delta, totals)
+        except ValueError as exc:
+            return {}, str(exc)
+        for item_key, delta in totals.items():
+            idx = self.find_item_index(item_key)
+            if idx < 0:
+                return {}, "Linked component is missing from inventory."
+            if self.items[idx].qty + delta < 0:
+                return {}, f"Quantity cannot go below zero for linked component {self.items[idx].id}."
+        return totals, ""
+
+    def apply_stock_deltas(self, deltas: dict[str, int], updated_at: str) -> None:
+        for item_key, delta in deltas.items():
+            if delta == 0:
+                continue
+            idx = self.find_item_index(item_key)
+            if idx < 0:
+                continue
+            self.items[idx].qty += delta
+            self.items[idx].updated_at = updated_at
 
     def item_to_dict(self, item: ItemRecord, base_url: str) -> dict[str, Any]:
         return {
@@ -2759,7 +2899,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         <label>QR/UPC<input id="desktop-edit-qr" type="text"></label>
         <label>Color<input id="desktop-edit-color" type="text"></label>
         <label>Material<input id="desktop-edit-material" type="text"></label>
-        <label>Parent product / kit<input id="desktop-edit-bom-product" type="text"></label>
+        <label>Parent product / kit<select id="desktop-edit-bom-product"><option value="">No parent</option></select></label>
         <label>Qty used in parent<input id="desktop-edit-bom-qty" type="number" min="0"></label>
         <label>Image<input id="desktop-edit-image" type="file" accept="image/*"></label>
         </div>
@@ -2783,11 +2923,15 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
   const params = new URLSearchParams(window.location.search);
     let currentId = params.get('id') || '';
     let currentItem = null;
+    let inventoryItems = [];
     async function json(url, options) {
       const response = await fetch(url, options || {});
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
       return data;
+    }
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
     function currentQrLink(itemId) {
       const resolvedId = String(itemId || currentId || '').trim();
@@ -2815,9 +2959,28 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       el.textContent = message || 'Saved to disk';
       el.className = tone ? `status-badge ${tone}` : 'status-badge';
     }
+    function setBomParentOptions(selectedValue) {
+      const select = $('desktop-edit-bom-product');
+      if (!select) return;
+      const selected = String(selectedValue || '').trim();
+      const currentKey = String(currentId || '').trim().toLowerCase();
+      const parents = (inventoryItems || [])
+        .filter((item) => ['product', 'kit'].includes(String(item.category || '').toLowerCase()))
+        .filter((item) => String(item.id || '').trim().toLowerCase() !== currentKey)
+        .sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
+      const selectedExists = !selected || parents.some((item) => String(item.id || '').trim() === selected);
+      const fallback = selected && !selectedExists ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(`${selected} - Missing from inventory`)}</option>` : '';
+      select.innerHTML = `<option value="">No parent</option>${fallback}${parents.map((item) => {
+        const id = String(item.id || '').trim();
+        const label = `${id} - ${item.part_name || 'Unnamed'} [${item.category_label || item.category || 'item'}]`;
+        return `<option value="${escapeHtml(id)}"${id === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('')}`;
+    }
   async function loadEdit() {
     if (!$('desktop-edit-panel') || !currentId) return;
     const payload = await json(`/api/item?id=${encodeURIComponent(currentId)}`);
+    const listPayload = await json('/api/items');
+    inventoryItems = Array.isArray(listPayload.items) ? listPayload.items : [];
     currentItem = payload.item;
     $('desktop-edit-id').value = currentItem.id || '';
     $('desktop-edit-name').value = currentItem.part_name || '';
@@ -2826,7 +2989,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       $('desktop-edit-qr').value = currentItem.qr_code || '';
       $('desktop-edit-color').value = currentItem.color || '';
       $('desktop-edit-material').value = currentItem.material || '';
-      $('desktop-edit-bom-product').value = currentItem.bom_product || '';
+      setBomParentOptions(currentItem.bom_product || '');
       $('desktop-edit-bom-qty').value = currentItem.bom_qty || 0;
     }
     async function saveItem() {
@@ -4156,26 +4319,26 @@ document.getElementById('category').addEventListener('change',load);document.get
 
         with store.lock:
             rollback = [ItemRecord(**asdict(item)) for item in store.items]
-            deductions: list[tuple[int, int]] = []
+            roots: list[tuple[ItemRecord, int]] = []
             for lookup_id, needed in requirements.items():
                 idx = next((i for i, item in enumerate(store.items) if normalize_lookup_value(item.id) == lookup_id), -1)
                 if idx < 0:
                     return json_error(404, f"Item not found for fulfillment: {lookup_id}")
-                if needed > store.items[idx].qty:
-                    return json_error(
-                        409,
-                        f"Insufficient stock for {store.items[idx].id}. Needed {needed}, available {store.items[idx].qty}.",
-                    )
-                deductions.append((idx, needed))
+                roots.append((store.items[idx], -needed))
 
             updated_at = current_timestamp()
-            total_removed = 0
+            deltas, delta_error = store.plan_linked_stock_changes(roots)
+            if delta_error:
+                return json_error(409, delta_error)
+            store.apply_stock_deltas(deltas, updated_at)
+            total_removed = sum(abs(delta) for delta in deltas.values() if delta < 0)
             detail_chunks = []
-            for idx, needed in deductions:
-                store.items[idx].qty -= needed
-                store.items[idx].updated_at = updated_at
-                total_removed += needed
-                detail_chunks.append(f"{store.items[idx].id}:-{needed}")
+            for delta_key, delta in deltas.items():
+                if delta >= 0:
+                    continue
+                idx = store.find_item_index(delta_key)
+                if idx >= 0:
+                    detail_chunks.append(f"{store.items[idx].id}:{delta}")
 
             if not store._save_inventory():
                 store.items = rollback
@@ -4190,7 +4353,7 @@ document.getElementById('category').addEventListener('change',load);document.get
             store.append_transaction(order_number, "fulfill_order", -total_removed, 0, detail[:220])
             store.append_device_log("order_fulfilled", detail[:220])
 
-        return jsonify({"ok": True, "order_number": order_number, "line_count": len(deductions), "units_removed": total_removed})
+        return jsonify({"ok": True, "order_number": order_number, "line_count": len(requirements), "units_removed": total_removed})
 
     @app.route("/api/files", methods=["GET"])
     def handle_files():
@@ -4317,6 +4480,7 @@ document.getElementById('category').addEventListener('change',load);document.get
         material = sanitize_field(arg("material"))
         image_ref = sanitize_field(arg("image_ref"))
         bom_product = sanitize_field(arg("bom_product"))
+        components_raw = arg("components", "")
 
         bom_qty_raw = arg("bom_qty", "")
         bom_qty = 0
@@ -4331,8 +4495,10 @@ document.getElementById('category').addEventListener('change',load);document.get
             bom_qty = 1
         if not bom_product and bom_qty > 0:
             return json_error(400, "Parent product or kit is required when quantity used in parent is set.")
-        if category != "part" and (bom_product or bom_qty > 0):
-            return json_error(400, "Only parts can be assigned to a parent product or kit.")
+        if bom_product:
+            error = store.bom_assignment_error(item_id, category, bom_product)
+            if error:
+                return json_error(400, error)
 
         qty_raw = arg("qty", "0")
         qty_parsed = parse_int(qty_raw)
@@ -4344,6 +4510,12 @@ document.getElementById('category').addEventListener('change',load);document.get
         with store.lock:
             if store.find_item_index(item_id) >= 0:
                 return json_error(409, "Part number already exists.")
+            rollback = [ItemRecord(**asdict(row)) for row in store.items]
+            components, component_error = store.parse_component_links(components_raw)
+            if component_error:
+                return json_error(400, component_error)
+            if components and category not in {"product", "kit"}:
+                return json_error(400, "Only products and kits can own BOM components.")
             item = ItemRecord(
                 id=item_id,
                 category=category,
@@ -4351,19 +4523,35 @@ document.getElementById('category').addEventListener('change',load);document.get
                 qr_code=qr_code,
                 color=color,
                 material=material,
-                qty=qty_parsed,
+                qty=0,
                 image_ref=image_ref,
                 bom_product=bom_product,
                 bom_qty=bom_qty,
                 updated_at=current_timestamp(),
             )
             store.items.append(item)
+            component_error = store.apply_component_links(item, components)
+            if component_error:
+                store.items = rollback
+                return json_error(400, component_error)
+            deltas, delta_error = store.plan_linked_stock_changes([(item, qty_parsed)])
+            if delta_error:
+                store.items = rollback
+                return json_error(400, delta_error)
+            store.apply_stock_deltas(deltas, current_timestamp())
             store.items.sort(key=lambda row: normalize_lookup_value(row.id))
             if not store._save_inventory():
-                store.items = [row for row in store.items if normalize_lookup_value(row.id) != normalize_lookup_value(item_id)]
+                store.items = rollback
                 return json_error(500, "Failed to persist inventory to disk.")
             saved_idx = store.find_item_index(item_id)
             store.append_transaction(item.id, "create", qty_parsed, qty_parsed, f"{item.part_name} created")
+            for delta_key, delta in deltas.items():
+                if delta_key == normalize_lookup_value(item.id) or delta == 0:
+                    continue
+                linked_idx = store.find_item_index(delta_key)
+                if linked_idx >= 0:
+                    linked = store.items[linked_idx]
+                    store.append_transaction(linked.id, "linked_create", delta, linked.qty, f"linked to {item.id}")
             store.append_device_log("item_created", f"{item.id} saved with qty {qty_parsed}")
             return jsonify(store.item_payload(store.items[saved_idx], base_url())), 201
 
@@ -4388,8 +4576,10 @@ document.getElementById('category').addEventListener('change',load);document.get
             bom_qty = 1
         if not bom_product and bom_qty > 0:
             return json_error(400, "Parent product or kit is required when quantity used in parent is set.")
-        if category != "part" and (bom_product or bom_qty > 0):
-            return json_error(400, "Only parts can be assigned to a parent product or kit.")
+        if bom_product:
+            error = store.bom_assignment_error(new_id, category, bom_product)
+            if error:
+                return json_error(400, error)
         with store.lock:
             idx = store.find_item_index(original_id)
             if idx < 0:
@@ -4397,6 +4587,13 @@ document.getElementById('category').addEventListener('change',load);document.get
             duplicate_idx = store.find_item_index(new_id)
             if duplicate_idx >= 0 and duplicate_idx != idx:
                 return json_error(409, "Part number already exists.")
+            if bom_product and normalize_lookup_value(bom_product) in {
+                normalize_lookup_value(original_id),
+                normalize_lookup_value(new_id),
+                normalize_lookup_value(store.items[idx].part_name),
+            }:
+                return json_error(400, "An item cannot contain itself as a component.")
+            rollback = [ItemRecord(**asdict(row)) for row in store.items]
             previous = ItemRecord(**asdict(store.items[idx]))
             item = store.items[idx]
             item.id = new_id
@@ -4405,7 +4602,7 @@ document.getElementById('category').addEventListener('change',load);document.get
             item.qr_code = sanitize_field(arg("qr_code"))
             item.color = sanitize_field(arg("color"))
             item.material = sanitize_field(arg("material"))
-            item.qty = qty
+            item.qty = previous.qty
             item.image_ref = sanitize_field(arg("image_ref", item.image_ref))
             item.bom_product = bom_product
             item.bom_qty = bom_qty
@@ -4414,12 +4611,24 @@ document.getElementById('category').addEventListener('change',load);document.get
                 for row in store.items:
                     if normalize_lookup_value(row.bom_product) == normalize_lookup_value(original_id):
                         row.bom_product = new_id
+            deltas, delta_error = store.plan_linked_stock_changes([(item, qty - previous.qty)])
+            if delta_error:
+                store.items = rollback
+                return json_error(400, delta_error)
+            store.apply_stock_deltas(deltas, item.updated_at)
             store.items.sort(key=lambda row: normalize_lookup_value(row.id))
             if not store._save_inventory():
-                store.items[idx] = previous
+                store.items = rollback
                 return json_error(500, "Failed to persist inventory to disk.")
             saved_idx = store.find_item_index(new_id)
             store.append_transaction(new_id, "edit_item", qty - previous.qty, qty, f"edited from {original_id}")
+            for delta_key, delta in deltas.items():
+                if delta_key == normalize_lookup_value(new_id) or delta == 0:
+                    continue
+                linked_idx = store.find_item_index(delta_key)
+                if linked_idx >= 0:
+                    linked = store.items[linked_idx]
+                    store.append_transaction(linked.id, "linked_edit", delta, linked.qty, f"linked to {new_id}")
             store.append_device_log("item_updated", f"{original_id} updated to {new_id}")
             return jsonify(store.item_payload(store.items[saved_idx], base_url()))
 
@@ -4453,12 +4662,24 @@ document.getElementById('category').addEventListener('change',load);document.get
             if idx < 0:
                 return json_error(404, "Item not found.")
             store.create_backup_zip("before_delete_item")
-            removed = store.items[idx]
+            rollback = [ItemRecord(**asdict(row)) for row in store.items]
+            removed = ItemRecord(**asdict(store.items[idx]))
+            deltas, delta_error = store.plan_linked_stock_changes([(store.items[idx], -removed.qty)])
+            if delta_error:
+                return json_error(400, delta_error)
+            store.apply_stock_deltas(deltas, current_timestamp())
             del store.items[idx]
             if not store._save_inventory():
-                store.items.insert(idx, removed)
+                store.items = rollback
                 return json_error(500, "Failed to persist inventory to disk.")
             store.append_transaction(item_id, "remove", -removed.qty, 0, "item removed")
+            for delta_key, delta in deltas.items():
+                if delta_key == normalize_lookup_value(item_id) or delta == 0:
+                    continue
+                linked_idx = store.find_item_index(delta_key)
+                if linked_idx >= 0:
+                    linked = store.items[linked_idx]
+                    store.append_transaction(linked.id, "linked_remove", delta, linked.qty, f"linked to {item_id}")
             store.append_device_log("item_removed", f"{item_id} removed from inventory.")
         return jsonify({"ok": True})
 
@@ -4476,18 +4697,24 @@ document.getElementById('category').addEventListener('change',load);document.get
             idx = store.find_item_index(item_id)
             if idx < 0:
                 return json_error(404, "Item not found.")
+            rollback = [ItemRecord(**asdict(row)) for row in store.items]
             new_qty = store.items[idx].qty + delta
-            if new_qty < 0:
-                return json_error(400, "Quantity cannot go below zero.")
-            previous_qty = store.items[idx].qty
-            previous_updated = store.items[idx].updated_at
-            store.items[idx].qty = new_qty
-            store.items[idx].updated_at = current_timestamp()
+            deltas, delta_error = store.plan_linked_stock_changes([(store.items[idx], delta)])
+            if delta_error:
+                return json_error(400, delta_error)
+            updated_at = current_timestamp()
+            store.apply_stock_deltas(deltas, updated_at)
             if not store._save_inventory():
-                store.items[idx].qty = previous_qty
-                store.items[idx].updated_at = previous_updated
+                store.items = rollback
                 return json_error(500, "Failed to persist inventory to disk.")
             store.append_transaction(item_id, "adjust", delta, new_qty, "quantity updated from item page")
+            for delta_key, linked_delta in deltas.items():
+                if delta_key == normalize_lookup_value(item_id) or linked_delta == 0:
+                    continue
+                linked_idx = store.find_item_index(delta_key)
+                if linked_idx >= 0:
+                    linked = store.items[linked_idx]
+                    store.append_transaction(linked.id, "linked_adjust", linked_delta, linked.qty, f"linked to {item_id}")
             store.append_device_log("item_adjusted", f"{item_id} adjusted by {delta} to {new_qty}")
             return jsonify(store.item_payload(store.items[idx], base_url()))
 
@@ -4505,16 +4732,25 @@ document.getElementById('category').addEventListener('change',load);document.get
             idx = store.find_item_index(item_id)
             if idx < 0:
                 return json_error(404, "Item not found.")
+            rollback = [ItemRecord(**asdict(row)) for row in store.items]
             previous_qty = store.items[idx].qty
-            previous_updated = store.items[idx].updated_at
             delta = qty - previous_qty
-            store.items[idx].qty = qty
-            store.items[idx].updated_at = current_timestamp()
+            deltas, delta_error = store.plan_linked_stock_changes([(store.items[idx], delta)])
+            if delta_error:
+                return json_error(400, delta_error)
+            updated_at = current_timestamp()
+            store.apply_stock_deltas(deltas, updated_at)
             if not store._save_inventory():
-                store.items[idx].qty = previous_qty
-                store.items[idx].updated_at = previous_updated
+                store.items = rollback
                 return json_error(500, "Failed to persist inventory to disk.")
             store.append_transaction(item_id, "set_qty", delta, qty, "quantity set directly")
+            for delta_key, linked_delta in deltas.items():
+                if delta_key == normalize_lookup_value(item_id) or linked_delta == 0:
+                    continue
+                linked_idx = store.find_item_index(delta_key)
+                if linked_idx >= 0:
+                    linked = store.items[linked_idx]
+                    store.append_transaction(linked.id, "linked_set_qty", linked_delta, linked.qty, f"linked to {item_id}")
             store.append_device_log("item_set_qty", f"{item_id} quantity set to {qty}")
             return jsonify(store.item_payload(store.items[idx], base_url()))
 

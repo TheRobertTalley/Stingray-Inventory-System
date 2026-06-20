@@ -244,6 +244,16 @@ struct OrderFulfillmentEntry {
   int32_t needed;
 };
 
+struct ComponentLink {
+  String itemId;
+  int32_t qty;
+};
+
+struct StockDelta {
+  String itemId;
+  int32_t delta;
+};
+
 std::vector<ItemRecord> g_items;
 bool g_sdReady = false;
 bool g_sdCardPresent = false;
@@ -1843,6 +1853,55 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       min-width: 100px;
     }
 
+    .kit-component-row td {
+      background: #f8fbfd;
+      border-top: 0;
+    }
+
+    .kit-component-editor {
+      display: grid;
+      gap: 0.6rem;
+      grid-template-columns: minmax(220px, 1fr) minmax(90px, 120px) auto;
+      align-items: end;
+    }
+
+    .kit-component-editor label {
+      margin: 0;
+    }
+
+    .kit-component-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.65rem;
+    }
+
+    .kit-component-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      padding: 0.32rem 0.45rem 0.32rem 0.65rem;
+      font-size: 0.82rem;
+      color: var(--ink);
+    }
+
+    .kit-component-pill button {
+      width: auto;
+      min-height: 0;
+      padding: 0.15rem 0.42rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+    }
+
+    @media (max-width: 720px) {
+      .kit-component-editor {
+        grid-template-columns: 1fr;
+      }
+    }
+
     .log-grid {
       display: grid;
       gap: 0.8rem;
@@ -2616,6 +2675,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       activeCategory: 'all',
       search: '',
       draftItem: null,
+      draftComponents: [],
+      draftComponentId: '',
+      draftComponentQty: '1',
       draftImageFile: null,
       draftBrandLogoFile: null,
       cloudConfig: null,
@@ -3206,6 +3268,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     function openDraftRow() {
       state.activeCategory = 'all';
       state.draftItem = state.draftItem || createDraftItem();
+      state.draftComponents = state.draftComponents || [];
       syncTabs();
       renderItems(filteredItems());
       focusDraftField();
@@ -3213,6 +3276,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     function closeDraftRow() {
       state.draftItem = null;
+      state.draftComponents = [];
+      state.draftComponentId = '';
+      state.draftComponentQty = '1';
       state.draftImageFile = null;
       renderItems(filteredItems());
     }
@@ -3235,7 +3301,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         image_ref: String(state.draftItem.image_ref || '').trim(),
       };
 
-      if (payload.category !== 'part') {
+      if (payload.category === 'product') {
         payload.bom_product = '';
         payload.bom_qty = '0';
       }
@@ -3315,6 +3381,117 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           >
         </div>
       `;
+    }
+
+    function draftComponentCandidates() {
+      const draftId = normalize(state.draftItem ? state.draftItem.id : '');
+      const selectedIds = new Set((state.draftComponents || []).map((component) => normalize(component.id)));
+      return [...state.items]
+        .filter((item) => ['part', 'kit'].includes(normalize(item.category)))
+        .filter((item) => normalize(item.id) && normalize(item.id) !== draftId && !selectedIds.has(normalize(item.id)))
+        .sort((a, b) => {
+          const categoryCompare = normalize(a.category || '').localeCompare(normalize(b.category || ''));
+          if (categoryCompare !== 0) {
+            return categoryCompare;
+          }
+          return normalize(a.id || '').localeCompare(normalize(b.id || ''));
+        });
+    }
+
+    function draftComponentOptionsHtml() {
+      const options = draftComponentCandidates();
+      const selectedId = String(state.draftComponentId || '').trim();
+      const optionHtml = options.map((item) => {
+        const id = String(item.id || '').trim();
+        const selected = id === selectedId ? ' selected' : '';
+        const category = item.category_label || item.category || 'item';
+        const label = `${id} - ${item.part_name || 'Unnamed'} [${category}] stock ${item.qty || 0}`;
+        return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(label)}</option>`;
+      }).join('');
+      return `<option value="">Select a part or sub-kit</option>${optionHtml}`;
+    }
+
+    function draftComponentsPayload() {
+      return (state.draftComponents || [])
+        .map((component) => `${String(component.id || '').trim()}|${toWholeNumber(component.qty, 1)}`)
+        .filter((line) => line && !line.startsWith('|'))
+        .join('\n');
+    }
+
+    function renderDraftComponentRow() {
+      if (!state.draftItem || normalize(state.draftItem.category) !== 'kit') {
+        return null;
+      }
+
+      const row = document.createElement('tr');
+      row.className = 'kit-component-row';
+      const selected = state.draftComponents || [];
+      const candidates = draftComponentCandidates();
+      row.innerHTML = `
+        <td colspan="9">
+          <div class="cell-stack">
+            <div class="kit-component-editor">
+              <label>
+                <span>Kit components</span>
+                <select data-draft-component-select>
+                  ${draftComponentOptionsHtml()}
+                </select>
+              </label>
+              <label>
+                <span>Qty per kit</span>
+                <input data-draft-component-qty type="number" min="1" value="${escapeHtml(state.draftComponentQty || '1')}">
+              </label>
+              <button type="button" class="secondary" data-draft-component-add${candidates.length ? '' : ' disabled'}>Add Component</button>
+            </div>
+            <div class="cell-note">Choose existing parts or kits to link as this kit's components. Linked quantities move with this kit's stock.</div>
+            <div class="kit-component-list">
+              ${selected.length ? selected.map((component, index) => `
+                <span class="kit-component-pill">
+                  ${escapeHtml(component.id)} x ${escapeHtml(component.qty)}
+                  <button type="button" class="secondary" data-draft-component-remove="${index}">Remove</button>
+                </span>
+              `).join('') : '<span class="cell-note">No components selected yet.</span>'}
+            </div>
+          </div>
+        </td>
+      `;
+      return row;
+    }
+
+    function addDraftComponent() {
+      if (!state.draftItem || normalize(state.draftItem.category) !== 'kit') {
+        return;
+      }
+
+      const componentId = String(state.draftComponentId || '').trim();
+      const qty = toWholeNumber(state.draftComponentQty, 1);
+      if (!componentId) {
+        setStatus('Choose a part or sub-kit to add to this kit.', 'error');
+        return;
+      }
+      if (qty <= 0) {
+        setStatus('Component quantity must be at least 1.', 'error');
+        return;
+      }
+
+      const existing = (state.draftComponents || []).find((component) => normalize(component.id) === normalize(componentId));
+      if (existing) {
+        existing.qty = qty;
+      } else {
+        state.draftComponents.push({ id: componentId, qty });
+      }
+      state.draftComponentId = '';
+      state.draftComponentQty = '1';
+      renderItems(filteredItems());
+    }
+
+    function removeDraftComponent(index) {
+      const idx = Number.parseInt(String(index), 10);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= (state.draftComponents || []).length) {
+        return;
+      }
+      state.draftComponents.splice(idx, 1);
+      renderItems(filteredItems());
     }
 
     function renderDraftRow() {
@@ -4013,6 +4190,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         if (draftRow) {
           itemsBody.appendChild(draftRow);
         }
+        const componentRow = renderDraftComponentRow();
+        if (componentRow) {
+          itemsBody.appendChild(componentRow);
+        }
       }
 
       if (!items.length) {
@@ -4126,6 +4307,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       params.set('image_ref', draft.image_ref);
       params.set('bom_product', draft.bom_product);
       params.set('bom_qty', draft.bom_qty || '0');
+      params.set('components', normalize(draft.category) === 'kit' ? draftComponentsPayload() : '');
       params.set('qty', draft.qty || '0');
 
       await readJson('/api/items/add', {
@@ -4136,6 +4318,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       rememberRecentSelection('colors', draft.color);
       rememberRecentSelection('materials', draft.material);
       state.draftItem = null;
+      state.draftComponents = [];
+      state.draftComponentId = '';
+      state.draftComponentQty = '1';
       await refreshItems();
       setStatus(`Item ${draft.id} added.`, 'ok');
     }
@@ -4599,6 +4784,18 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       itemsBody.addEventListener('click', (event) => {
+        const componentAddButton = event.target.closest('[data-draft-component-add]');
+        if (componentAddButton && state.draftItem) {
+          addDraftComponent();
+          return;
+        }
+
+        const componentRemoveButton = event.target.closest('[data-draft-component-remove]');
+        if (componentRemoveButton && state.draftItem) {
+          removeDraftComponent(componentRemoveButton.dataset.draftComponentRemove);
+          return;
+        }
+
         const imageTrigger = event.target.closest('.image-trigger');
         if (imageTrigger) {
           openImagePreview(
@@ -4652,6 +4849,11 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           return;
         }
 
+        if (event.target.hasAttribute('data-draft-component-qty')) {
+          state.draftComponentQty = event.target.value || '1';
+          return;
+        }
+
         const customField = event.target.dataset.draftCustom;
         if (customField) {
           state.draftItem[customField] = event.target.value;
@@ -4674,11 +4876,21 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
         if (event.target.hasAttribute('data-draft-category')) {
           state.draftItem.category = event.target.value || 'part';
-          if (normalize(state.draftItem.category) !== 'part') {
+          if (normalize(state.draftItem.category) === 'product') {
             state.draftItem.bom_product = '';
             state.draftItem.bom_qty = '0';
           }
+          if (normalize(state.draftItem.category) !== 'kit') {
+            state.draftComponents = [];
+            state.draftComponentId = '';
+            state.draftComponentQty = '1';
+          }
           renderItems(filteredItems());
+          return;
+        }
+
+        if (event.target.hasAttribute('data-draft-component-select')) {
+          state.draftComponentId = event.target.value || '';
           return;
         }
 
@@ -5426,7 +5638,7 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
 
     <section class="bom-panel">
       <h2>BOM Components</h2>
-      <p id="bom-caption">Parts assigned to this product or kit appear here.</p>
+      <p id="bom-caption">Parts and kits assigned to this product or kit appear here.</p>
       <div id="bom-list" class="bom-list">
         <div class="bom-empty">No BOM components loaded.</div>
       </div>
@@ -5543,14 +5755,14 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
 
       if (!(item.has_bom || item.category === 'product' || item.category === 'kit')) {
         bomCaptionEl.textContent = 'This item is not a product or kit, so it does not own a BOM list.';
-        bomListEl.innerHTML = '<div class="bom-empty">Parts can still point to this item through the parent product / kit field.</div>';
+        bomListEl.innerHTML = '<div class="bom-empty">Parts and kits can still point to this item through the parent product / kit field.</div>';
         return;
       }
 
-      bomCaptionEl.textContent = `Parts assigned to ${item.part_name || 'this item'} are treated as its BOM.`;
+      bomCaptionEl.textContent = `Parts and kits assigned to ${item.part_name || 'this item'} are treated as its BOM.`;
 
       if (!components.length) {
-        bomListEl.innerHTML = '<div class="bom-empty">No parts currently point at this product or kit.</div>';
+        bomListEl.innerHTML = '<div class="bom-empty">No parts or kits currently point at this product or kit.</div>';
         return;
       }
 
@@ -6169,6 +6381,262 @@ int findItemIndex(const String& id) {
     }
   }
   return -1;
+}
+
+int findItemIndexByLookup(const String& value) {
+  const String lookup = normalizeLookupValue(value);
+  if (lookup.isEmpty()) {
+    return -1;
+  }
+
+  for (size_t i = 0; i < g_items.size(); ++i) {
+    if (normalizeLookupValue(g_items[i].id) == lookup || normalizeLookupValue(g_items[i].partName) == lookup) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+bool itemCanHaveBom(const ItemRecord& item);
+bool isBomComponentOf(const ItemRecord& component, const ItemRecord& parent);
+bool parseIntText(const String& rawValue, int32_t& outValue);
+
+bool itemCanBeBomComponent(const ItemRecord& item) {
+  const String category = normalizeCategory(item.category);
+  return category == "part" || category == "kit";
+}
+
+String bomAssignmentError(const String& componentId, const String& componentCategory, const String& parentLookup) {
+  const String parentText = trimCopy(parentLookup);
+  if (parentText.isEmpty()) {
+    return "";
+  }
+
+  const String normalizedCategory = normalizeCategory(componentCategory);
+  if (normalizedCategory != "part" && normalizedCategory != "kit") {
+    return "Only parts and kits can be assigned to a parent product or kit.";
+  }
+
+  const int parentIdx = findItemIndexByLookup(parentText);
+  if (parentIdx < 0) {
+    return "Parent product or kit must match an existing product or kit.";
+  }
+
+  if (!itemCanHaveBom(g_items[parentIdx])) {
+    return "Parent item must be a product or kit.";
+  }
+
+  const String componentKey = normalizeLookupValue(componentId);
+  if (!componentKey.isEmpty() && componentKey == normalizeLookupValue(g_items[parentIdx].id)) {
+    return "An item cannot contain itself as a component.";
+  }
+
+  std::vector<String> seen;
+  seen.push_back(componentKey);
+  ItemRecord cursor = g_items[parentIdx];
+  while (!trimCopy(cursor.bomProduct).isEmpty()) {
+    const int cursorIdx = findItemIndexByLookup(cursor.bomProduct);
+    if (cursorIdx < 0) {
+      break;
+    }
+    const String cursorKey = normalizeLookupValue(g_items[cursorIdx].id);
+    for (const String& value : seen) {
+      if (value == cursorKey) {
+        return "This BOM link would create a component cycle.";
+      }
+    }
+    seen.push_back(cursorKey);
+    cursor = g_items[cursorIdx];
+  }
+
+  return "";
+}
+
+bool parseComponentLinks(const String& rawComponents, std::vector<ComponentLink>& outLinks, String& errorMessage) {
+  outLinks.clear();
+  String components = rawComponents;
+  components.replace("\r", "\n");
+
+  int start = 0;
+  while (start <= static_cast<int>(components.length())) {
+    const int end = components.indexOf('\n', start);
+    const int next = end < 0 ? static_cast<int>(components.length()) : end;
+    String line = trimCopy(components.substring(start, next));
+    start = end < 0 ? static_cast<int>(components.length()) + 1 : end + 1;
+    if (line.isEmpty()) {
+      continue;
+    }
+
+    const std::vector<String> fields = splitPipeLine(line);
+    if (fields.size() < 2) {
+      errorMessage = "Invalid component line format.";
+      return false;
+    }
+
+    const String componentId = trimCopy(sanitizeField(fields[0]));
+    int32_t qty = 0;
+    if (componentId.isEmpty() || !parseIntText(fields[1], qty) || qty <= 0) {
+      errorMessage = "Component quantity must be a positive integer.";
+      return false;
+    }
+
+    const int idx = findItemIndex(componentId);
+    if (idx < 0) {
+      errorMessage = "Component not found: " + componentId;
+      return false;
+    }
+    if (!itemCanBeBomComponent(g_items[idx])) {
+      errorMessage = "Only parts and kits can be components: " + g_items[idx].id;
+      return false;
+    }
+
+    bool merged = false;
+    const String key = normalizeLookupValue(g_items[idx].id);
+    for (ComponentLink& link : outLinks) {
+      if (normalizeLookupValue(link.itemId) == key) {
+        link.qty += qty;
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) {
+      ComponentLink link;
+      link.itemId = g_items[idx].id;
+      link.qty = qty;
+      outLinks.push_back(link);
+    }
+  }
+
+  errorMessage = "";
+  return true;
+}
+
+bool applyComponentLinks(const ItemRecord& parent, const std::vector<ComponentLink>& links, String& errorMessage) {
+  if (links.empty()) {
+    errorMessage = "";
+    return true;
+  }
+  if (!itemCanHaveBom(parent)) {
+    errorMessage = "Only products and kits can own BOM components.";
+    return false;
+  }
+
+  const String parentKey = normalizeLookupValue(parent.id);
+  const String now = currentTimestamp();
+  for (const ComponentLink& link : links) {
+    const int idx = findItemIndex(link.itemId);
+    if (idx < 0) {
+      errorMessage = "Component not found: " + link.itemId;
+      return false;
+    }
+    if (normalizeLookupValue(g_items[idx].id) == parentKey) {
+      errorMessage = "An item cannot contain itself as a component.";
+      return false;
+    }
+    errorMessage = bomAssignmentError(g_items[idx].id, g_items[idx].category, parent.id);
+    if (!errorMessage.isEmpty()) {
+      return false;
+    }
+    g_items[idx].bomProduct = parent.id;
+    g_items[idx].bomQty = link.qty;
+    g_items[idx].updatedAt = now;
+  }
+
+  errorMessage = "";
+  return true;
+}
+
+void mergeStockDelta(std::vector<StockDelta>& deltas, const String& itemId, int32_t delta) {
+  const String key = normalizeLookupValue(itemId);
+  for (StockDelta& entry : deltas) {
+    if (normalizeLookupValue(entry.itemId) == key) {
+      entry.delta += delta;
+      return;
+    }
+  }
+  StockDelta entry;
+  entry.itemId = itemId;
+  entry.delta = delta;
+  deltas.push_back(entry);
+}
+
+bool collectLinkedStockDeltas(const ItemRecord& item, int32_t delta, std::vector<StockDelta>& deltas, std::vector<String>& path, String& errorMessage) {
+  if (delta == 0) {
+    return true;
+  }
+
+  const String itemKey = normalizeLookupValue(item.id);
+  for (const String& value : path) {
+    if (value == itemKey) {
+      errorMessage = "BOM cycle detected while applying linked inventory changes.";
+      return false;
+    }
+  }
+
+  path.push_back(itemKey);
+  mergeStockDelta(deltas, item.id, delta);
+
+  if (itemCanHaveBom(item)) {
+    for (const ItemRecord& component : g_items) {
+      if (!isBomComponentOf(component, item)) {
+        continue;
+      }
+      const int32_t componentQty = component.bomQty > 0 ? component.bomQty : 0;
+      if (componentQty <= 0) {
+        continue;
+      }
+      if (!collectLinkedStockDeltas(component, delta * componentQty, deltas, path, errorMessage)) {
+        return false;
+      }
+    }
+  }
+
+  path.pop_back();
+  return true;
+}
+
+bool planLinkedStockChanges(const std::vector<StockDelta>& roots, std::vector<StockDelta>& outDeltas, String& errorMessage) {
+  outDeltas.clear();
+  for (const StockDelta& root : roots) {
+    const int idx = findItemIndex(root.itemId);
+    if (idx < 0) {
+      errorMessage = "Linked item is missing from inventory.";
+      return false;
+    }
+    std::vector<String> path;
+    if (!collectLinkedStockDeltas(g_items[idx], root.delta, outDeltas, path, errorMessage)) {
+      return false;
+    }
+  }
+
+  for (const StockDelta& delta : outDeltas) {
+    const int idx = findItemIndex(delta.itemId);
+    if (idx < 0) {
+      errorMessage = "Linked component is missing from inventory.";
+      return false;
+    }
+    if (g_items[idx].qty + delta.delta < 0) {
+      errorMessage = "Quantity cannot go below zero for linked component " + g_items[idx].id + ".";
+      return false;
+    }
+  }
+
+  errorMessage = "";
+  return true;
+}
+
+void applyStockDeltas(const std::vector<StockDelta>& deltas, const String& updatedAt) {
+  for (const StockDelta& delta : deltas) {
+    if (delta.delta == 0) {
+      continue;
+    }
+    const int idx = findItemIndex(delta.itemId);
+    if (idx < 0) {
+      continue;
+    }
+    g_items[idx].qty += delta.delta;
+    g_items[idx].updatedAt = updatedAt;
+  }
 }
 
 bool parseIdArg(const char* argName, String& outValue) {
@@ -7560,7 +8028,11 @@ bool itemCanHaveBom(const ItemRecord& item) {
 }
 
 bool isBomComponentOf(const ItemRecord& component, const ItemRecord& parent) {
-  if (normalizeCategory(component.category) != "part") {
+  if (!itemCanBeBomComponent(component)) {
+    return false;
+  }
+
+  if (normalizeLookupValue(component.id) == normalizeLookupValue(parent.id)) {
     return false;
   }
 
@@ -9151,16 +9623,8 @@ void handleFulfillOrder() {
     return;
   }
 
-  struct InventoryDeduction {
-    int itemIndex;
-    String itemId;
-    int32_t needed;
-    int32_t beforeQty;
-    int32_t afterQty;
-  };
-
-  std::vector<InventoryDeduction> deductions;
-  deductions.reserve(requirements.size());
+  std::vector<StockDelta> roots;
+  roots.reserve(requirements.size());
 
   for (size_t i = 0; i < requirements.size(); ++i) {
     const int idx = findItemIndex(requirements[i].itemId);
@@ -9169,34 +9633,26 @@ void handleFulfillOrder() {
       return;
     }
 
-    const int32_t stock = g_items[idx].qty;
-    if (requirements[i].needed > stock) {
-      sendError(409, "Insufficient stock for " + g_items[idx].id + ". Needed " + String(requirements[i].needed) + ", available " + String(stock) + ".");
-      return;
-    }
-
-    InventoryDeduction deduction;
-    deduction.itemIndex = idx;
-    deduction.itemId = g_items[idx].id;
-    deduction.needed = requirements[i].needed;
-    deduction.beforeQty = stock;
-    deduction.afterQty = stock - requirements[i].needed;
-    deductions.push_back(deduction);
+    StockDelta root;
+    root.itemId = g_items[idx].id;
+    root.delta = -requirements[i].needed;
+    roots.push_back(root);
   }
 
-  if (deductions.empty()) {
+  if (roots.empty()) {
     sendError(400, "No selected items to fulfill.");
     return;
   }
 
   const std::vector<ItemRecord> rollbackItems = g_items;
   const String updatedAt = currentTimestamp();
-  int32_t totalRemoved = 0;
-  for (size_t i = 0; i < deductions.size(); ++i) {
-    g_items[deductions[i].itemIndex].qty = deductions[i].afterQty;
-    g_items[deductions[i].itemIndex].updatedAt = updatedAt;
-    totalRemoved += deductions[i].needed;
+  std::vector<StockDelta> deltas;
+  String deltaError;
+  if (!planLinkedStockChanges(roots, deltas, deltaError)) {
+    sendError(409, deltaError);
+    return;
   }
+  applyStockDeltas(deltas, updatedAt);
 
   if (!saveInventory()) {
     g_items = rollbackItems;
@@ -9212,11 +9668,18 @@ void handleFulfillOrder() {
   }
 
   String detail = orderNumber + " ";
-  for (size_t i = 0; i < deductions.size(); ++i) {
-    if (i > 0) {
+  int32_t totalRemoved = 0;
+  bool firstDetail = true;
+  for (size_t i = 0; i < deltas.size(); ++i) {
+    if (deltas[i].delta >= 0) {
+      continue;
+    }
+    totalRemoved += -deltas[i].delta;
+    if (!firstDetail) {
       detail += ", ";
     }
-    detail += deductions[i].itemId + ":-" + String(deductions[i].needed);
+    firstDetail = false;
+    detail += deltas[i].itemId + ":" + String(deltas[i].delta);
   }
   if (detail.length() > 220) {
     detail = detail.substring(0, 217) + "...";
@@ -9230,7 +9693,7 @@ void handleFulfillOrder() {
 
   String response = "{\"ok\":true";
   response += ",\"order_number\":\"" + jsonEscape(orderNumber) + "\"";
-  response += ",\"line_count\":" + String(deductions.size());
+  response += ",\"line_count\":" + String(requirements.size());
   response += ",\"units_removed\":" + String(totalRemoved);
   response += "}";
   sendJson(200, response);
@@ -9592,6 +10055,7 @@ void handleAddItem() {
   const String material = server.hasArg("material") ? sanitizeField(server.arg("material")) : "";
   const String imageRef = server.hasArg("image_ref") ? sanitizeField(server.arg("image_ref")) : "";
   const String bomProduct = server.hasArg("bom_product") ? sanitizeField(server.arg("bom_product")) : "";
+  const String componentsRaw = server.hasArg("components") ? server.arg("components") : "";
 
   int32_t bomQty = 0;
   if (server.hasArg("bom_qty") && !parseIntArg("bom_qty", bomQty)) {
@@ -9613,9 +10077,12 @@ void handleAddItem() {
     return;
   }
 
-  if (category != "part" && (!bomProduct.isEmpty() || bomQty > 0)) {
-    sendError(400, "Only parts can be assigned to a parent product or kit.");
-    return;
+  if (!bomProduct.isEmpty()) {
+    const String errorMessage = bomAssignmentError(id, category, bomProduct);
+    if (!errorMessage.isEmpty()) {
+      sendError(400, errorMessage);
+      return;
+    }
   }
 
   int32_t qty = 0;
@@ -9634,6 +10101,19 @@ void handleAddItem() {
     return;
   }
 
+  std::vector<ComponentLink> componentLinks;
+  String componentError;
+  if (!parseComponentLinks(componentsRaw, componentLinks, componentError)) {
+    sendError(400, componentError);
+    return;
+  }
+  if (!componentLinks.empty() && category != "product" && category != "kit") {
+    sendError(400, "Only products and kits can own BOM components.");
+    return;
+  }
+
+  const std::vector<ItemRecord> rollbackItems = g_items;
+
   ItemRecord item;
   item.id = id;
   item.category = category;
@@ -9641,22 +10121,39 @@ void handleAddItem() {
   item.qrCode = qrCode;
   item.color = color;
   item.material = material;
-  item.qty = qty;
+  item.qty = 0;
   item.imageRef = imageRef;
   item.bomProduct = bomProduct;
   item.bomQty = bomQty;
   item.updatedAt = currentTimestamp();
 
   g_items.push_back(item);
+  if (!applyComponentLinks(item, componentLinks, componentError)) {
+    g_items = rollbackItems;
+    sendError(400, componentError);
+    return;
+  }
+
+  std::vector<StockDelta> roots;
+  StockDelta root;
+  root.itemId = item.id;
+  root.delta = qty;
+  roots.push_back(root);
+  std::vector<StockDelta> deltas;
+  String deltaError;
+  if (!planLinkedStockChanges(roots, deltas, deltaError)) {
+    g_items = rollbackItems;
+    sendError(400, deltaError);
+    return;
+  }
+  applyStockDeltas(deltas, currentTimestamp());
+
   std::sort(g_items.begin(), g_items.end(), [](const ItemRecord& a, const ItemRecord& b) {
     return normalizeLookupValue(a.id) < normalizeLookupValue(b.id);
   });
 
   if (!saveInventory()) {
-    const int rollbackIdx = findItemIndex(id);
-    if (rollbackIdx >= 0) {
-      g_items.erase(g_items.begin() + rollbackIdx);
-    }
+    g_items = rollbackItems;
     sendError(500, "Failed to persist inventory to SD card.");
     return;
   }
@@ -9668,6 +10165,15 @@ void handleAddItem() {
   }
 
   appendTransaction(item.id, "create", qty, qty, itemDisplayName(item) + " created");
+  for (const StockDelta& delta : deltas) {
+    if (normalizeLookupValue(delta.itemId) == normalizeLookupValue(item.id) || delta.delta == 0) {
+      continue;
+    }
+    const int linkedIdx = findItemIndex(delta.itemId);
+    if (linkedIdx >= 0) {
+      appendTransaction(g_items[linkedIdx].id, "linked_create", delta.delta, g_items[linkedIdx].qty, "linked to " + item.id);
+    }
+  }
   appendDeviceLog("info", "item_created", item.id + " saved with qty " + String(qty));
   markCloudDirty("item_created");
   maybeAutoSyncGoogle("item_created");
@@ -9692,16 +10198,38 @@ void handleRemoveItem() {
     return;
   }
 
+  const std::vector<ItemRecord> rollbackItems = g_items;
   const ItemRecord removed = g_items[idx];
+  std::vector<StockDelta> roots;
+  StockDelta root;
+  root.itemId = removed.id;
+  root.delta = -removed.qty;
+  roots.push_back(root);
+  std::vector<StockDelta> deltas;
+  String deltaError;
+  if (!planLinkedStockChanges(roots, deltas, deltaError)) {
+    sendError(400, deltaError);
+    return;
+  }
+  applyStockDeltas(deltas, currentTimestamp());
   g_items.erase(g_items.begin() + idx);
 
   if (!saveInventory()) {
-    g_items.insert(g_items.begin() + idx, removed);
+    g_items = rollbackItems;
     sendError(500, "Failed to persist inventory to SD card.");
     return;
   }
 
   appendTransaction(id, "remove", -removed.qty, 0, "item removed");
+  for (const StockDelta& delta : deltas) {
+    if (normalizeLookupValue(delta.itemId) == normalizeLookupValue(id) || delta.delta == 0) {
+      continue;
+    }
+    const int linkedIdx = findItemIndex(delta.itemId);
+    if (linkedIdx >= 0) {
+      appendTransaction(g_items[linkedIdx].id, "linked_remove", delta.delta, g_items[linkedIdx].qty, "linked to " + id);
+    }
+  }
   appendDeviceLog("info", "item_removed", id + " removed from inventory.");
   markCloudDirty("item_removed");
   maybeAutoSyncGoogle("item_removed");
@@ -9739,24 +10267,37 @@ void handleAdjustItem() {
   }
 
   const int32_t newQty = g_items[idx].qty + delta;
-  if (newQty < 0) {
-    sendError(400, "Quantity cannot go below zero.");
+  const std::vector<ItemRecord> rollbackItems = g_items;
+  std::vector<StockDelta> roots;
+  StockDelta root;
+  root.itemId = g_items[idx].id;
+  root.delta = delta;
+  roots.push_back(root);
+  std::vector<StockDelta> deltas;
+  String deltaError;
+  if (!planLinkedStockChanges(roots, deltas, deltaError)) {
+    sendError(400, deltaError);
     return;
   }
 
-  const int32_t previousQty = g_items[idx].qty;
-  const String previousUpdatedAt = g_items[idx].updatedAt;
-  g_items[idx].qty = newQty;
-  g_items[idx].updatedAt = currentTimestamp();
+  applyStockDeltas(deltas, currentTimestamp());
 
   if (!saveInventory()) {
-    g_items[idx].qty = previousQty;
-    g_items[idx].updatedAt = previousUpdatedAt;
+    g_items = rollbackItems;
     sendError(500, "Failed to persist inventory to SD card.");
     return;
   }
 
   appendTransaction(id, "adjust", delta, newQty, "quantity updated from item page");
+  for (const StockDelta& linkedDelta : deltas) {
+    if (normalizeLookupValue(linkedDelta.itemId) == normalizeLookupValue(id) || linkedDelta.delta == 0) {
+      continue;
+    }
+    const int linkedIdx = findItemIndex(linkedDelta.itemId);
+    if (linkedIdx >= 0) {
+      appendTransaction(g_items[linkedIdx].id, "linked_adjust", linkedDelta.delta, g_items[linkedIdx].qty, "linked to " + id);
+    }
+  }
   appendDeviceLog("info", "item_adjusted", id + " adjusted by " + String(delta) + " to " + String(newQty));
   markCloudDirty("item_adjusted");
   maybeAutoSyncGoogle("item_adjusted");
@@ -9793,20 +10334,38 @@ void handleSetItemQty() {
     return;
   }
 
+  const std::vector<ItemRecord> rollbackItems = g_items;
   const int32_t previousQty = g_items[idx].qty;
-  const String previousUpdatedAt = g_items[idx].updatedAt;
   const int32_t delta = qty - previousQty;
-  g_items[idx].qty = qty;
-  g_items[idx].updatedAt = currentTimestamp();
+  std::vector<StockDelta> roots;
+  StockDelta root;
+  root.itemId = g_items[idx].id;
+  root.delta = delta;
+  roots.push_back(root);
+  std::vector<StockDelta> deltas;
+  String deltaError;
+  if (!planLinkedStockChanges(roots, deltas, deltaError)) {
+    sendError(400, deltaError);
+    return;
+  }
+  applyStockDeltas(deltas, currentTimestamp());
 
   if (!saveInventory()) {
-    g_items[idx].qty = previousQty;
-    g_items[idx].updatedAt = previousUpdatedAt;
+    g_items = rollbackItems;
     sendError(500, "Failed to persist inventory to SD card.");
     return;
   }
 
   appendTransaction(id, "set_qty", delta, qty, "quantity set directly");
+  for (const StockDelta& linkedDelta : deltas) {
+    if (normalizeLookupValue(linkedDelta.itemId) == normalizeLookupValue(id) || linkedDelta.delta == 0) {
+      continue;
+    }
+    const int linkedIdx = findItemIndex(linkedDelta.itemId);
+    if (linkedIdx >= 0) {
+      appendTransaction(g_items[linkedIdx].id, "linked_set_qty", linkedDelta.delta, g_items[linkedIdx].qty, "linked to " + id);
+    }
+  }
   appendDeviceLog("info", "item_set_qty", id + " quantity set to " + String(qty));
   markCloudDirty("item_set_qty");
   maybeAutoSyncGoogle("item_set_qty");
