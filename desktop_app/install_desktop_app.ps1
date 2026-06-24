@@ -246,11 +246,39 @@ if (-not (Test-Path (Join-Path $SourceDir "StingrayInventoryDesktop.exe"))) {
   throw "StingrayInventoryDesktop.exe not found in: $SourceDir"
 }
 
+# Stop any existing startup tasks before replacing app files so the old supervisor
+# cannot relaunch the app while the install directory is being refreshed.
+foreach ($taskName in @($SystemTaskName, $legacySystemTaskName) | Select-Object -Unique) {
+  if (-not $taskName) {
+    continue
+  }
+
+  $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if ($existingTask) {
+    try {
+      Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    } catch {
+    }
+    try {
+      Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    } catch {
+    }
+  }
+}
+
 # Stop running app so in-use DLLs do not block installation updates.
 $runningApp = Get-Process -Name "StingrayInventoryDesktop" -ErrorAction SilentlyContinue
 if ($runningApp) {
   $runningApp | Stop-Process -Force
   Start-Sleep -Milliseconds 300
+}
+
+$psProcesses = Get-CimInstance Win32_Process -Filter "name='powershell.exe'" -ErrorAction SilentlyContinue
+foreach ($proc in ($psProcesses | Where-Object { $_.CommandLine -match 'StingrayDesktopSupervisor\.ps1' })) {
+  try {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+  } catch {
+  }
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
