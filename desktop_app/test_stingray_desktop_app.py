@@ -515,6 +515,48 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue(status["last_saved_at"])
         self.assertIn(status["last_saved_reason"], {"inventory", "journal_recovery"})
 
+    def test_bom_inventory_and_linked_counts_persist_after_restart(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        firmware_ino = Path(__file__).resolve().parents[1] / "firmware" / "StingrayInventoryESP32" / "StingrayInventoryESP32.ino"
+        data_dir = Path(tmp.name) / "ProgramData" / "Inventory" / "data"
+
+        app1, _ = create_app(data_dir, firmware_ino=firmware_ino, bind_host="0.0.0.0", port=8787)
+        client1 = app1.test_client()
+        self.assertEqual(client1.post("/api/items/add", json={"id": "PARTA", "part_name": "Part A", "qty": "10"}).status_code, 201)
+        self.assertEqual(client1.post("/api/items/add", json={"id": "PARTB", "part_name": "Part B", "qty": "10"}).status_code, 201)
+        self.assertEqual(
+            client1.post(
+                "/api/items/add",
+                json={"id": "KIT1", "category": "kit", "part_name": "Kit One", "qty": "1", "components": "PARTA|2"},
+            ).status_code,
+            201,
+        )
+        self.assertEqual(
+            client1.post(
+                "/api/items/add",
+                json={"id": "PROD1", "category": "product", "part_name": "Product One", "qty": "3", "components": "PARTB|4\nKIT1|1"},
+            ).status_code,
+            201,
+        )
+
+        app2, _ = create_app(data_dir, firmware_ino=firmware_ino, bind_host="0.0.0.0", port=8787)
+        client2 = app2.test_client()
+
+        product_payload = client2.get("/api/item?id=PROD1").get_json()
+        self.assertEqual({component["id"] for component in product_payload["bom_components"]}, {"PARTB", "KIT1"})
+        self.assertEqual(client2.get("/api/item?id=PROD1").get_json()["item"]["qty"], 3)
+        self.assertEqual(client2.get("/api/item?id=KIT1").get_json()["item"]["qty"], 4)
+        self.assertEqual(client2.get("/api/item?id=PARTA").get_json()["item"]["qty"], 18)
+        self.assertEqual(client2.get("/api/item?id=PARTB").get_json()["item"]["qty"], 22)
+
+        adjusted = client2.post("/api/items/adjust", json={"id": "PROD1", "delta": "-1"})
+        self.assertEqual(adjusted.status_code, 200)
+        self.assertEqual(client2.get("/api/item?id=PROD1").get_json()["item"]["qty"], 2)
+        self.assertEqual(client2.get("/api/item?id=KIT1").get_json()["item"]["qty"], 3)
+        self.assertEqual(client2.get("/api/item?id=PARTA").get_json()["item"]["qty"], 16)
+        self.assertEqual(client2.get("/api/item?id=PARTB").get_json()["item"]["qty"], 18)
+
     def test_existing_ui_gets_desktop_settings_and_item_edit_controls(self):
         client, _ = self.make_client()
         client.post("/api/items/add", json={"id": "UI1", "part_name": "UI Item", "qty": "1"})
