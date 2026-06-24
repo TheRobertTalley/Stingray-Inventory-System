@@ -153,7 +153,9 @@ const size_t MAX_IMAGE_UPLOAD_BYTES = 2 * 1024 * 1024;
 const size_t MAX_ORDERS_PAYLOAD_BYTES = 256 * 1024;
 const size_t MAX_ORDER_FULFILL_PLAN_BYTES = 8192;
 const size_t MAX_ORDER_FULFILL_LINES = 200;
-const char* UI_ASSET_VERSION = "2026-03-26-ui-order-fulfill-1";
+// Bump whenever the shared UI HTML or JS changes so updated devices rewrite
+// stale SD-cached pages on first boot after flashing.
+const char* UI_ASSET_VERSION = "2026-06-24-ui-kit-bom-refresh-1";
 const char* GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 const char* GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code";
 const char* GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
