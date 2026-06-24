@@ -1272,6 +1272,10 @@ class DesktopStore:
     def item_can_be_bom_component(self, item: ItemRecord) -> bool:
         return normalize_category(item.category) in {"part", "kit"}
 
+    def bom_components_for_parent(self, parent: ItemRecord, items: list[ItemRecord] | None = None) -> list[ItemRecord]:
+        rows = self.items if items is None else items
+        return [component for component in rows if self.is_bom_component_of(component, parent)]
+
     def is_bom_component_of(self, component: ItemRecord, parent: ItemRecord) -> bool:
         if not self.item_can_be_bom_component(component):
             return False
@@ -1358,15 +1362,51 @@ class DesktopStore:
             component.updated_at = current_timestamp()
         return ""
 
+    def replace_component_links(
+        self,
+        previous_parent: ItemRecord,
+        parent: ItemRecord,
+        components: list[tuple[str, int]],
+    ) -> str:
+        if components and not self.item_can_have_bom(parent):
+            return "Only products and kits can own BOM components."
+        timestamp = current_timestamp()
+        selected = {normalize_lookup_value(component_id): qty for component_id, qty in components}
+        for component in self.bom_components_for_parent(previous_parent):
+            if normalize_lookup_value(component.id) in selected:
+                continue
+            component.bom_product = ""
+            component.bom_qty = 0
+            component.updated_at = timestamp
+        if not components:
+            return ""
+        parent_key = normalize_lookup_value(parent.id)
+        for component_id, qty in components:
+            idx = self.find_item_index(component_id)
+            if idx < 0:
+                return f"Component not found: {component_id}"
+            component = self.items[idx]
+            if normalize_lookup_value(component.id) == parent_key:
+                return "An item cannot contain itself as a component."
+            error = self.bom_assignment_error(component.id, component.category, parent.id)
+            if error:
+                return error
+            component.bom_product = parent.id
+            component.bom_qty = qty
+            component.updated_at = timestamp
+        return ""
+
     def collect_linked_stock_deltas(
         self,
         item: ItemRecord,
         delta: int,
         totals: dict[str, int],
         path: set[str] | None = None,
+        items: list[ItemRecord] | None = None,
     ) -> None:
         if delta == 0:
             return
+        rows = self.items if items is None else items
         path = set(path or set())
         item_key = normalize_lookup_value(item.id)
         if item_key in path:
@@ -1375,27 +1415,44 @@ class DesktopStore:
         totals[item_key] = totals.get(item_key, 0) + delta
         if not self.item_can_have_bom(item):
             return
-        for component in self.items:
+        for component in rows:
             if not self.is_bom_component_of(component, item):
                 continue
             component_qty = max(0, int(component.bom_qty or 0))
             if component_qty <= 0:
                 continue
-            self.collect_linked_stock_deltas(component, delta * component_qty, totals, path)
+            self.collect_linked_stock_deltas(component, delta * component_qty, totals, path, rows)
 
-    def plan_linked_stock_changes(self, roots: list[tuple[ItemRecord, int]]) -> tuple[dict[str, int], str]:
+    def collect_linked_stock_totals(
+        self,
+        roots: list[tuple[ItemRecord, int]],
+        items: list[ItemRecord] | None = None,
+    ) -> tuple[dict[str, int], str]:
         totals: dict[str, int] = {}
+        rows = self.items if items is None else items
         try:
             for item, delta in roots:
-                self.collect_linked_stock_deltas(item, delta, totals)
+                self.collect_linked_stock_deltas(item, delta, totals, items=rows)
         except ValueError as exc:
             return {}, str(exc)
-        for item_key, delta in totals.items():
+        return totals, ""
+
+    def validate_stock_deltas(self, deltas: dict[str, int]) -> str:
+        for item_key, delta in deltas.items():
             idx = self.find_item_index(item_key)
             if idx < 0:
-                return {}, "Linked component is missing from inventory."
+                return "Linked component is missing from inventory."
             if self.items[idx].qty + delta < 0:
-                return {}, f"Quantity cannot go below zero for linked component {self.items[idx].id}."
+                return f"Quantity cannot go below zero for linked component {self.items[idx].id}."
+        return ""
+
+    def plan_linked_stock_changes(self, roots: list[tuple[ItemRecord, int]]) -> tuple[dict[str, int], str]:
+        totals, error = self.collect_linked_stock_totals(roots)
+        if error:
+            return {}, error
+        validation_error = self.validate_stock_deltas(totals)
+        if validation_error:
+            return {}, validation_error
         return totals, ""
 
     def apply_stock_deltas(self, deltas: dict[str, int], updated_at: str) -> None:
@@ -1428,7 +1485,7 @@ class DesktopStore:
         }
 
     def item_payload(self, item: ItemRecord, base_url: str) -> dict[str, Any]:
-        components = [self.item_to_dict(component, base_url) for component in self.items if self.is_bom_component_of(component, item)]
+        components = [self.item_to_dict(component, base_url) for component in self.bom_components_for_parent(item)]
         return {"item": self.item_to_dict(item, base_url), "bom_components": components}
 
     def matches_category_filter(self, item: ItemRecord, raw_filter: str) -> bool:
@@ -2903,6 +2960,23 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         <label>Qty used in parent<input id="desktop-edit-bom-qty" type="number" min="0"></label>
         <label>Image<input id="desktop-edit-image" type="file" accept="image/*"></label>
         </div>
+        <div id="desktop-edit-components-panel" class="cell-stack" hidden>
+          <div class="kit-component-editor">
+            <label>
+              <span>Product / kit components</span>
+              <select id="desktop-edit-component-select"><option value="">Select a part or kit</option></select>
+            </label>
+            <label>
+              <span>Qty per parent</span>
+              <input id="desktop-edit-component-qty" type="number" min="1" value="1">
+            </label>
+            <button id="desktop-edit-component-add-btn" type="button" class="secondary">Add Component</button>
+          </div>
+          <div class="cell-note">Choose existing parts or kits to link as this product or kit's components. Linked quantities move with this item's stock.</div>
+          <div id="desktop-edit-components-list" class="kit-component-list">
+            <span class="cell-note">No components selected yet.</span>
+          </div>
+        </div>
         <div class="actions">
           <button id="desktop-save-item-btn" type="button">Save Item</button>
           <button id="desktop-sync-qr-btn" type="button" class="secondary">Sync QR to Current URL</button>
@@ -2924,6 +2998,7 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
     let currentId = params.get('id') || '';
     let currentItem = null;
     let inventoryItems = [];
+    let currentComponents = [];
     async function json(url, options) {
       const response = await fetch(url, options || {});
       const data = await response.json().catch(() => ({}));
@@ -2959,14 +3034,23 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       el.textContent = message || 'Saved to disk';
       el.className = tone ? `status-badge ${tone}` : 'status-badge';
     }
+    function normalizeText(value) {
+      return String(value || '').trim().toLowerCase();
+    }
+    function canOwnBom(category) {
+      return ['product', 'kit'].includes(normalizeText(category));
+    }
+    function canBeBomComponent(category) {
+      return ['part', 'kit'].includes(normalizeText(category));
+    }
     function setBomParentOptions(selectedValue) {
       const select = $('desktop-edit-bom-product');
       if (!select) return;
       const selected = String(selectedValue || '').trim();
-      const currentKey = String(currentId || '').trim().toLowerCase();
+      const currentKey = normalizeText($('desktop-edit-id') ? $('desktop-edit-id').value : currentId);
       const parents = (inventoryItems || [])
-        .filter((item) => ['product', 'kit'].includes(String(item.category || '').toLowerCase()))
-        .filter((item) => String(item.id || '').trim().toLowerCase() !== currentKey)
+        .filter((item) => canOwnBom(item.category))
+        .filter((item) => normalizeText(item.id) !== currentKey)
         .sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
       const selectedExists = !selected || parents.some((item) => String(item.id || '').trim() === selected);
       const fallback = selected && !selectedExists ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(`${selected} - Missing from inventory`)}</option>` : '';
@@ -2976,12 +3060,115 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         return `<option value="${escapeHtml(id)}"${id === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`;
       }).join('')}`;
     }
+    function componentPayload() {
+      return currentComponents
+        .map((component) => `${String(component.id || '').trim()}|${Math.max(1, Number.parseInt(String(component.qty || '1'), 10) || 1)}`)
+        .filter((line) => line && !line.startsWith('|'))
+        .join('\n');
+    }
+    function setComponentOptions(selectedValue) {
+      const select = $('desktop-edit-component-select');
+      if (!select) return;
+      const selected = String(selectedValue || '').trim();
+      const currentKey = normalizeText($('desktop-edit-id') ? $('desktop-edit-id').value : currentId);
+      const chosenKeys = new Set(currentComponents.map((component) => normalizeText(component.id)));
+      if (selected) {
+        chosenKeys.delete(normalizeText(selected));
+      }
+      const candidates = (inventoryItems || [])
+        .filter((item) => canBeBomComponent(item.category))
+        .filter((item) => normalizeText(item.id) && normalizeText(item.id) !== currentKey && !chosenKeys.has(normalizeText(item.id)))
+        .sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
+      const optionHtml = candidates.map((item) => {
+        const id = String(item.id || '').trim();
+        const label = `${id} - ${item.part_name || 'Unnamed'} [${item.category_label || item.category || 'item'}] stock ${item.qty || 0}`;
+        return `<option value="${escapeHtml(id)}"${id === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('');
+      select.innerHTML = `<option value="">Select a part or kit</option>${optionHtml}`;
+      select.value = selected;
+      const addButton = $('desktop-edit-component-add-btn');
+      if (addButton) {
+        addButton.disabled = candidates.length === 0 && !selected;
+      }
+    }
+    function renderComponentEditor() {
+      const panel = $('desktop-edit-components-panel');
+      const list = $('desktop-edit-components-list');
+      if (!panel || !list) return;
+      const category = $('desktop-edit-category') ? $('desktop-edit-category').value : (currentItem ? currentItem.category : '');
+      const ownsBom = canOwnBom(category);
+      panel.hidden = !ownsBom;
+      if (!ownsBom) {
+        return;
+      }
+      list.innerHTML = currentComponents.length ? currentComponents.map((component, index) => `
+        <span class="kit-component-pill">
+          ${escapeHtml(component.id)} x ${escapeHtml(component.qty)}
+          <button type="button" class="secondary" data-desktop-component-remove="${index}">Remove</button>
+        </span>
+      `).join('') : '<span class="cell-note">No components selected yet.</span>';
+      setComponentOptions('');
+    }
+    function syncBomControls() {
+      const category = $('desktop-edit-category') ? $('desktop-edit-category').value : (currentItem ? currentItem.category : '');
+      const parentAllowed = canBeBomComponent(category);
+      const parentSelect = $('desktop-edit-bom-product');
+      const parentQty = $('desktop-edit-bom-qty');
+      if (parentSelect) {
+        parentSelect.disabled = !parentAllowed;
+      }
+      if (parentQty) {
+        parentQty.disabled = !parentAllowed;
+      }
+      if (!parentAllowed) {
+        if (parentSelect) {
+          parentSelect.value = '';
+        }
+        if (parentQty) {
+          parentQty.value = 0;
+        }
+      }
+      renderComponentEditor();
+    }
+    function addComponent() {
+      const select = $('desktop-edit-component-select');
+      const qtyInput = $('desktop-edit-component-qty');
+      const componentId = select ? String(select.value || '').trim() : '';
+      const qty = Math.max(1, Number.parseInt(String(qtyInput ? qtyInput.value : '1'), 10) || 1);
+      if (!componentId) {
+        status('Choose a part or kit to add as a component.', true);
+        return;
+      }
+      const existing = currentComponents.find((component) => normalizeText(component.id) === normalizeText(componentId));
+      if (existing) {
+        existing.qty = qty;
+      } else {
+        currentComponents.push({id: componentId, qty});
+      }
+      if (qtyInput) {
+        qtyInput.value = 1;
+      }
+      status('');
+      renderComponentEditor();
+    }
+    function removeComponent(index) {
+      const idx = Number.parseInt(String(index), 10);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= currentComponents.length) {
+        return;
+      }
+      currentComponents.splice(idx, 1);
+      renderComponentEditor();
+    }
   async function loadEdit() {
     if (!$('desktop-edit-panel') || !currentId) return;
     const payload = await json(`/api/item?id=${encodeURIComponent(currentId)}`);
     const listPayload = await json('/api/items');
     inventoryItems = Array.isArray(listPayload.items) ? listPayload.items : [];
     currentItem = payload.item;
+    currentComponents = Array.isArray(payload.bom_components) ? payload.bom_components.map((component) => ({
+      id: String(component.id || '').trim(),
+      qty: Math.max(1, Number.parseInt(String(component.bom_qty || '1'), 10) || 1),
+    })) : [];
     $('desktop-edit-id').value = currentItem.id || '';
     $('desktop-edit-name').value = currentItem.part_name || '';
     $('desktop-edit-category').value = currentItem.category || '';
@@ -2991,19 +3178,22 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       $('desktop-edit-material').value = currentItem.material || '';
       setBomParentOptions(currentItem.bom_product || '');
       $('desktop-edit-bom-qty').value = currentItem.bom_qty || 0;
+      syncBomControls();
     }
     async function saveItem() {
+      const category = $('desktop-edit-category').value;
       const body = {
         original_id: currentId,
       id: $('desktop-edit-id').value,
       part_name: $('desktop-edit-name').value,
-      category: $('desktop-edit-category').value,
+      category,
       qty: $('desktop-edit-qty').value,
       qr_code: $('desktop-edit-qr').value,
       color: $('desktop-edit-color').value,
       material: $('desktop-edit-material').value,
-      bom_product: $('desktop-edit-bom-product').value,
-      bom_qty: $('desktop-edit-bom-qty').value,
+      bom_product: canBeBomComponent(category) ? $('desktop-edit-bom-product').value : '',
+      bom_qty: canBeBomComponent(category) ? $('desktop-edit-bom-qty').value : '0',
+      components: canOwnBom(category) ? componentPayload() : '',
       image_ref: currentItem && currentItem.image_ref || ''
       };
       const saved = await json('/api/items/update', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -3037,6 +3227,20 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
   }
     document.addEventListener('DOMContentLoaded', () => {
       if (!$('desktop-edit-panel')) return;
+      $('desktop-edit-component-add-btn').addEventListener('click', () => addComponent());
+      $('desktop-edit-components-list').addEventListener('click', (event) => {
+        const button = event.target.closest('[data-desktop-component-remove]');
+        if (!button) return;
+        removeComponent(button.dataset.desktopComponentRemove);
+      });
+      $('desktop-edit-category').addEventListener('input', () => {
+        setBomParentOptions($('desktop-edit-bom-product').value);
+        syncBomControls();
+      });
+      $('desktop-edit-id').addEventListener('input', () => {
+        setBomParentOptions($('desktop-edit-bom-product').value);
+        renderComponentEditor();
+      });
       $('desktop-save-item-btn').addEventListener('click', () => saveItem().catch((e) => {
         const message = String(e && e.message ? e.message : e || '');
         if (message.includes('already exists')) {
@@ -4559,6 +4763,7 @@ document.getElementById('category').addEventListener('change',load);document.get
     def handle_update_item():
         original_id = trim_copy(arg("original_id", arg("id")))
         new_id = trim_copy(sanitize_field(arg("id")))
+        components_raw = arg("components", "")
         if not original_id or not new_id:
             return json_error(400, "Part number is required.")
         qty = parse_int(arg("qty", "0"))
@@ -4595,6 +4800,14 @@ document.getElementById('category').addEventListener('change',load);document.get
                 return json_error(400, "An item cannot contain itself as a component.")
             rollback = [ItemRecord(**asdict(row)) for row in store.items]
             previous = ItemRecord(**asdict(store.items[idx]))
+            components, component_error = store.parse_component_links(components_raw)
+            if component_error:
+                return json_error(400, component_error)
+            if components and category not in {"product", "kit"}:
+                return json_error(400, "Only products and kits can own BOM components.")
+            old_totals, delta_error = store.collect_linked_stock_totals([(previous, previous.qty)], items=rollback)
+            if delta_error:
+                return json_error(400, delta_error)
             item = store.items[idx]
             item.id = new_id
             item.category = category
@@ -4607,11 +4820,24 @@ document.getElementById('category').addEventListener('change',load);document.get
             item.bom_product = bom_product
             item.bom_qty = bom_qty
             item.updated_at = current_timestamp()
-            if normalize_lookup_value(original_id) != normalize_lookup_value(new_id):
-                for row in store.items:
-                    if normalize_lookup_value(row.bom_product) == normalize_lookup_value(original_id):
-                        row.bom_product = new_id
-            deltas, delta_error = store.plan_linked_stock_changes([(item, qty - previous.qty)])
+            component_error = store.replace_component_links(previous, item, components)
+            if component_error:
+                store.items = rollback
+                return json_error(400, component_error)
+            new_totals, delta_error = store.collect_linked_stock_totals([(item, qty)])
+            if delta_error:
+                store.items = rollback
+                return json_error(400, delta_error)
+            previous_key = normalize_lookup_value(previous.id)
+            new_key = normalize_lookup_value(new_id)
+            if previous_key != new_key and previous_key in old_totals:
+                old_totals[new_key] = old_totals.get(new_key, 0) + old_totals.pop(previous_key)
+            deltas: dict[str, int] = {}
+            for item_key in set(old_totals) | set(new_totals):
+                delta = new_totals.get(item_key, 0) - old_totals.get(item_key, 0)
+                if delta:
+                    deltas[item_key] = delta
+            delta_error = store.validate_stock_deltas(deltas)
             if delta_error:
                 store.items = rollback
                 return json_error(400, delta_error)

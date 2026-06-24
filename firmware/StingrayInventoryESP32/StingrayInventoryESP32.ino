@@ -3400,6 +3400,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         });
     }
 
+    function draftItemCanOwnBom() {
+      return Boolean(state.draftItem) && ['product', 'kit'].includes(normalize(state.draftItem.category));
+    }
+
     function draftComponentOptionsHtml() {
       const options = draftComponentCandidates();
       const selectedId = String(state.draftComponentId || '').trim();
@@ -3410,7 +3414,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         const label = `${id} - ${item.part_name || 'Unnamed'} [${category}] stock ${item.qty || 0}`;
         return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(label)}</option>`;
       }).join('');
-      return `<option value="">Select a part or sub-kit</option>${optionHtml}`;
+      return `<option value="">Select a part or kit</option>${optionHtml}`;
     }
 
     function draftComponentsPayload() {
@@ -3421,7 +3425,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     }
 
     function renderDraftComponentRow() {
-      if (!state.draftItem || normalize(state.draftItem.category) !== 'kit') {
+      if (!draftItemCanOwnBom()) {
         return null;
       }
 
@@ -3434,18 +3438,18 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           <div class="cell-stack">
             <div class="kit-component-editor">
               <label>
-                <span>Kit components</span>
+                <span>Product / kit components</span>
                 <select data-draft-component-select>
                   ${draftComponentOptionsHtml()}
                 </select>
               </label>
               <label>
-                <span>Qty per kit</span>
+                <span>Qty per parent</span>
                 <input data-draft-component-qty type="number" min="1" value="${escapeHtml(state.draftComponentQty || '1')}">
               </label>
               <button type="button" class="secondary" data-draft-component-add${candidates.length ? '' : ' disabled'}>Add Component</button>
             </div>
-            <div class="cell-note">Choose existing parts or kits to link as this kit's components. Linked quantities move with this kit's stock.</div>
+            <div class="cell-note">Choose existing parts or kits to link as this product or kit's components. Linked quantities move with this item's stock.</div>
             <div class="kit-component-list">
               ${selected.length ? selected.map((component, index) => `
                 <span class="kit-component-pill">
@@ -3461,14 +3465,14 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     }
 
     function addDraftComponent() {
-      if (!state.draftItem || normalize(state.draftItem.category) !== 'kit') {
+      if (!draftItemCanOwnBom()) {
         return;
       }
 
       const componentId = String(state.draftComponentId || '').trim();
       const qty = toWholeNumber(state.draftComponentQty, 1);
       if (!componentId) {
-        setStatus('Choose a part or sub-kit to add to this kit.', 'error');
+        setStatus('Choose a part or kit to add as a component.', 'error');
         return;
       }
       if (qty <= 0) {
@@ -4309,7 +4313,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       params.set('image_ref', draft.image_ref);
       params.set('bom_product', draft.bom_product);
       params.set('bom_qty', draft.bom_qty || '0');
-      params.set('components', normalize(draft.category) === 'kit' ? draftComponentsPayload() : '');
+      params.set('components', ['product', 'kit'].includes(normalize(draft.category)) ? draftComponentsPayload() : '');
       params.set('qty', draft.qty || '0');
 
       await readJson('/api/items/add', {
@@ -4882,7 +4886,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
             state.draftItem.bom_product = '';
             state.draftItem.bom_qty = '0';
           }
-          if (normalize(state.draftItem.category) !== 'kit') {
+          if (!['product', 'kit'].includes(normalize(state.draftItem.category))) {
             state.draftComponents = [];
             state.draftComponentId = '';
             state.draftComponentQty = '1';
