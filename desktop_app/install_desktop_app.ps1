@@ -323,17 +323,30 @@ New-NetFirewallRule `
   -Description "Allow Inventory from devices on the local LAN, including Windows networks classified as Public." | Out-Null
 
 $mainPageUrl = "http://127.0.0.1:$Port/"
+$launcherScriptPath = Join-Path $InstallDir "Run-StingrayDesktop.ps1"
+$launcherScriptContent = @"
+`$ErrorActionPreference = "SilentlyContinue"
+`$appDir = Split-Path -Parent `$MyInvocation.MyCommand.Path
+`$mainUrl = "$mainPageUrl"
+`$statusUrl = "`${mainUrl}api/status"
+
+try {
+  Invoke-WebRequest -Uri `$statusUrl -UseBasicParsing -TimeoutSec 2 | Out-Null
+  Start-Process `$mainUrl | Out-Null
+  exit 0
+} catch {
+}
+
+`$exePath = Join-Path `$appDir "StingrayInventoryDesktop.exe"
+`$args = @("--host", "0.0.0.0", "--port", "$Port", "--data-dir", "$DataDir", "--open-browser")
+Start-Process -FilePath `$exePath -ArgumentList `$args -WindowStyle Hidden | Out-Null
+"@
+Set-Content -LiteralPath $launcherScriptPath -Value $launcherScriptContent -Encoding UTF8
+
 $launcherPath = Join-Path $InstallDir "Run-StingrayDesktop.cmd"
 $launcherContent = @"
 @echo off
-setlocal
-set APPDIR=%~dp0
-set URL=$mainPageUrl
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri '%URL%api/status' -UseBasicParsing -TimeoutSec 2 | Out-Null; Start-Process '%URL%'; exit 0 } catch { exit 1 }"
-if %ERRORLEVEL% EQU 0 goto :done
-"%APPDIR%StingrayInventoryDesktop.exe" --host 0.0.0.0 --port $Port --data-dir "$DataDir" --open-browser
-:done
-endlocal
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Run-StingrayDesktop.ps1"
 "@
 Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
 
@@ -359,7 +372,7 @@ while ($true) {
   }
 
   try {
-    $process = Start-Process -FilePath $exePath -ArgumentList $args -PassThru
+    $process = Start-Process -FilePath $exePath -ArgumentList $args -WindowStyle Hidden -PassThru
     Wait-Process -Id $process.Id
   } catch {
   }
@@ -392,13 +405,17 @@ Update-CloudBranding -CloudConfigPath $cloudConfigPath -NewBrandName $BrandName 
 
 $shortcutIcon = if (Test-Path $iconPath) { $iconPath } else { Join-Path $InstallDir "StingrayInventoryDesktop.exe" }
 
+$powershellExe = Resolve-PowerShellExe
+$launcherArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherScriptPath`""
+
 $wsh = New-Object -ComObject WScript.Shell
 $startMenuDir = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Inventory"
 New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
 
 $startShortcutPath = Join-Path $startMenuDir "Inventory.lnk"
 $startShortcut = $wsh.CreateShortcut($startShortcutPath)
-$startShortcut.TargetPath = $launcherPath
+$startShortcut.TargetPath = $powershellExe
+$startShortcut.Arguments = $launcherArgs
 $startShortcut.WorkingDirectory = $InstallDir
 $startShortcut.IconLocation = $shortcutIcon
 $startShortcut.Description = "Open Inventory main page"
@@ -406,13 +423,12 @@ $startShortcut.Save()
 
 $manualShortcutPath = Join-Path $startMenuDir "Inventory (Manual Start).lnk"
 $manualShortcut = $wsh.CreateShortcut($manualShortcutPath)
-$manualShortcut.TargetPath = $launcherPath
+$manualShortcut.TargetPath = $powershellExe
+$manualShortcut.Arguments = $launcherArgs
 $manualShortcut.WorkingDirectory = $InstallDir
 $manualShortcut.IconLocation = $shortcutIcon
 $manualShortcut.Description = "Start Inventory desktop app and open browser"
 $manualShortcut.Save()
-
-$powershellExe = Resolve-PowerShellExe
 
 $stopScriptPath = Join-Path $InstallDir "stop_desktop_app.ps1"
 $stopShortcutPath = Join-Path $startMenuDir "Stop Inventory.lnk"
@@ -437,7 +453,8 @@ $uninstallShortcut.Save()
 $desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "Inventory.lnk"
 if (-not $NoDesktopShortcut) {
   $desktopShortcut = $wsh.CreateShortcut($desktopShortcutPath)
-  $desktopShortcut.TargetPath = $launcherPath
+  $desktopShortcut.TargetPath = $powershellExe
+  $desktopShortcut.Arguments = $launcherArgs
   $desktopShortcut.WorkingDirectory = $InstallDir
   $desktopShortcut.IconLocation = $shortcutIcon
   $desktopShortcut.Description = "Open Inventory main page"
@@ -498,7 +515,7 @@ if ($NoAutoStart) {
 }
 
 if ($RunAfterInstall) {
-  Start-Process -FilePath $launcherPath
+  Start-Process -FilePath $powershellExe -ArgumentList $launcherArgs -WindowStyle Hidden
 }
 
 Write-Host "Installed Inventory to: $InstallDir"

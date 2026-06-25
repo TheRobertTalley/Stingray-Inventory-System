@@ -114,19 +114,32 @@ if (-not (Test-Path (Join-Path $appDistDir "StingrayInventoryDesktop.exe"))) {
   throw "PyInstaller build failed. EXE not found."
 }
 
-$runnerCmdPath = Join-Path $appDistDir "Run-StingrayDesktop.cmd"
-$runnerContent = @"
-@echo off
-setlocal
-set APPDIR=%~dp0
-set URL=http://127.0.0.1:$Port/
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri '%URL%api/status' -UseBasicParsing -TimeoutSec 2 | Out-Null; Start-Process '%URL%'; exit 0 } catch { exit 1 }"
-if %ERRORLEVEL% EQU 0 goto :done
-"%APPDIR%StingrayInventoryDesktop.exe" --host 0.0.0.0 --port $Port --data-dir "$DataDir" --open-browser
-:done
-endlocal
+$runnerScriptPath = Join-Path $appDistDir "Run-StingrayDesktop.ps1"
+$runnerScriptContent = @"
+`$ErrorActionPreference = "SilentlyContinue"
+`$appDir = Split-Path -Parent `$MyInvocation.MyCommand.Path
+`$mainUrl = "http://127.0.0.1:$Port/"
+`$statusUrl = "`${mainUrl}api/status"
+
+try {
+  Invoke-WebRequest -Uri `$statusUrl -UseBasicParsing -TimeoutSec 2 | Out-Null
+  Start-Process `$mainUrl | Out-Null
+  exit 0
+} catch {
+}
+
+`$exePath = Join-Path `$appDir "StingrayInventoryDesktop.exe"
+`$args = @("--host", "0.0.0.0", "--port", "$Port", "--data-dir", "$DataDir", "--open-browser")
+Start-Process -FilePath `$exePath -ArgumentList `$args -WindowStyle Hidden | Out-Null
 "@
-Set-Content -LiteralPath $runnerCmdPath -Value $runnerContent -Encoding ASCII
+Set-Content -LiteralPath $runnerScriptPath -Value $runnerScriptContent -Encoding UTF8
+
+$runnerCmdPath = Join-Path $appDistDir "Run-StingrayDesktop.cmd"
+$runnerCmdContent = @"
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Run-StingrayDesktop.ps1"
+"@
+Set-Content -LiteralPath $runnerCmdPath -Value $runnerCmdContent -Encoding ASCII
 
 Copy-Item -Path (Join-Path $scriptDir "stop_desktop_app.ps1") -Destination (Join-Path $appDistDir "stop_desktop_app.ps1") -Force
 Copy-Item -Path (Join-Path $scriptDir "uninstall_desktop_app.ps1") -Destination (Join-Path $appDistDir "uninstall_desktop_app.ps1") -Force

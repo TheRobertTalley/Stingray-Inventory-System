@@ -62,6 +62,18 @@ IMPORT_COPY_FILES = [
 SD_IMPORT_SEARCH_DEPTH = 4
 
 
+def ensure_standard_streams() -> None:
+    if getattr(sys, "stdout", None) is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8", buffering=1)
+    if getattr(sys, "stderr", None) is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8", buffering=1)
+    if getattr(sys, "stdin", None) is None:
+        sys.stdin = open(os.devnull, "r", encoding="utf-8")
+
+
+ensure_standard_streams()
+
+
 def runtime_root() -> Path:
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", "")
@@ -101,6 +113,16 @@ def resolve_default_desktop_data_dir() -> Path:
         return legacy_dir
 
     return new_dir
+
+
+def safe_print(message: str) -> None:
+    stream = getattr(sys, "stdout", None)
+    if stream is None:
+        return
+    try:
+        print(message, file=stream)
+    except Exception:
+        return
 
 
 @dataclass
@@ -5088,6 +5110,13 @@ def open_browser_when_ready(store: DesktopStore) -> None:
     threading.Thread(target=worker, daemon=True).start()
 
 
+def serve_http_app(app: Flask, host: str, port: int) -> None:
+    from werkzeug.serving import make_server
+
+    server = make_server(host, port, app, threaded=True)
+    server.serve_forever()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=f"{APP_DISPLAY_NAME} Desktop App")
     parser.add_argument("--data-dir", type=Path, default=resolve_default_desktop_data_dir())
@@ -5105,19 +5134,19 @@ def main() -> None:
     app, store = create_app(data_dir=args.data_dir, firmware_ino=args.firmware_ino, bind_host=args.host, port=args.port)
     if args.self_test:
         run_self_test(app)
-        print("Self-test passed.")
+        safe_print("Self-test passed.")
         return
 
     if args.open_browser:
         open_browser_when_ready(store)
 
-    print(f"{APP_DISPLAY_NAME} desktop listening on http://{args.host}:{args.port}/")
-    print(f"Local PC URL: {store.local_pc_url()}/")
-    print(f"LAN URL: {store.configured_base_url()}/")
+    safe_print(f"{APP_DISPLAY_NAME} desktop listening on http://{args.host}:{args.port}/")
+    safe_print(f"Local PC URL: {store.local_pc_url()}/")
+    safe_print(f"LAN URL: {store.configured_base_url()}/")
     if not store.app_config.setup_complete:
-        print(f"Setup URL: {store.setup_page_url()}")
-    print(f"Data directory: {store.data_dir}")
-    app.run(host=args.host, port=args.port, debug=False)
+        safe_print(f"Setup URL: {store.setup_page_url()}")
+    safe_print(f"Data directory: {store.data_dir}")
+    serve_http_app(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
