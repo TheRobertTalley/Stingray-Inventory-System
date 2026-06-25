@@ -155,7 +155,7 @@ const size_t MAX_ORDER_FULFILL_PLAN_BYTES = 8192;
 const size_t MAX_ORDER_FULFILL_LINES = 200;
 // Bump whenever the shared UI HTML or JS changes so updated devices rewrite
 // stale SD-cached pages on first boot after flashing.
-const char* UI_ASSET_VERSION = "2026-06-24-ui-kit-bom-refresh-1";
+const char* UI_ASSET_VERSION = "2026-06-25-ui-add-flow-bom-entry-1";
 const char* GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 const char* GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code";
 const char* GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -1800,6 +1800,18 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       width: 100%;
     }
 
+    .action-add-group {
+      display: grid;
+      gap: 0.55rem;
+      min-width: 0;
+    }
+
+    .action-add-buttons {
+      display: grid;
+      gap: 0.65rem;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
     .settings-inline-row {
       display: grid;
       gap: 0.65rem;
@@ -1847,6 +1859,18 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       font-size: 0.74rem;
       color: var(--muted);
       line-height: 1.35;
+    }
+
+    .draft-category-display {
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      padding: 0.55rem 0.72rem;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--ink);
+      font-weight: 700;
     }
 
     .inline-actions {
@@ -2219,6 +2243,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       .action-remove-row {
         grid-template-columns: 1fr;
       }
+
+      .action-add-buttons {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 700px) {
@@ -2273,7 +2301,15 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <section id="inventory-actions-section" class="quick-action">
       <h2>Inventory Actions</h2>
       <div class="action-grid">
-        <button id="add-row-btn" type="button">Add Item</button>
+        <div class="action-add-group">
+          <div class="small">Add inventory</div>
+          <div class="action-add-buttons">
+            <button id="add-row-btn" type="button">Add Item</button>
+            <button id="add-kit-btn" type="button">Add Kit</button>
+            <button id="add-product-btn" type="button">Add Product</button>
+          </div>
+          <p class="small">Add Item creates a part number. Add Kit creates a kit number. Add Product creates a product part number. Kits and products can both include pasted part numbers or kit numbers as components.</p>
+        </div>
         <form id="remove-form" class="action-remove">
           <label for="remove-id">Remove By Part Number</label>
           <div class="action-remove-row">
@@ -2606,6 +2642,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     const inventoryTitle = document.getElementById('inventory-title');
     const inventoryCaption = document.getElementById('inventory-caption');
     const addRowBtn = document.getElementById('add-row-btn');
+    const addKitBtn = document.getElementById('add-kit-btn');
+    const addProductBtn = document.getElementById('add-product-btn');
     const ordersTabBtn = document.getElementById('orders-tab-btn');
     const ordersAddBtn = document.getElementById('orders-add-btn');
     const ordersRefreshBtn = document.getElementById('orders-refresh-btn');
@@ -3222,10 +3260,38 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       await refreshItems();
     }
 
-    function createDraftItem() {
+    function draftCategoryValue(category) {
+      const normalized = normalize(category);
+      if (normalized === 'product' || normalized === 'kit') {
+        return normalized;
+      }
+      return 'part';
+    }
+
+    function draftCategoryLabelFor(category) {
+      const match = CATEGORY_OPTIONS.find((option) => option.value === draftCategoryValue(category));
+      return match ? match.label : 'Part';
+    }
+
+    function draftIdentifierLabelFor(category) {
+      return draftCategoryValue(category) === 'kit' ? 'Kit number' : 'Part number';
+    }
+
+    function draftActionNoteFor(category) {
+      const normalized = draftCategoryValue(category);
+      if (normalized === 'kit') {
+        return 'Create a kit number, then paste existing part numbers or smaller kit numbers as its components.';
+      }
+      if (normalized === 'product') {
+        return 'Create a product part number, then paste existing part numbers or kit numbers as its components.';
+      }
+      return 'Create a part number. Use Add Kit or Add Product above when this item needs components.';
+    }
+
+    function createDraftItem(category = 'part') {
       return {
         id: '',
-        category: 'part',
+        category: draftCategoryValue(category),
         part_name: '',
         color: '',
         material: '',
@@ -3255,6 +3321,24 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       return Boolean(state.draftItem) && state.activeCategory === 'all';
     }
 
+    function draftHasUnsavedContent() {
+      if (!state.draftItem) {
+        return false;
+      }
+
+      return Boolean(
+        String(state.draftItem.id || '').trim() ||
+        String(state.draftItem.part_name || '').trim() ||
+        String(state.draftItem.color || '').trim() ||
+        String(state.draftItem.material || '').trim() ||
+        String(state.draftItem.qr_code || '').trim() ||
+        String(state.draftItem.image_ref || '').trim() ||
+        toWholeNumber(state.draftItem.qty, 0) > 0 ||
+        (state.draftComponents || []).length ||
+        state.draftImageFile
+      );
+    }
+
     function focusDraftField(selector = '[data-draft-field="id"]') {
       window.setTimeout(() => {
         const field = itemsBody.querySelector(selector);
@@ -3267,12 +3351,27 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       }, 0);
     }
 
-    function openDraftRow() {
+    function openDraftRow(category = 'part') {
+      const nextCategory = draftCategoryValue(category);
+      const currentCategory = draftCategoryValue(state.draftItem ? state.draftItem.category : '');
+      if (state.draftItem && currentCategory !== nextCategory && draftHasUnsavedContent()) {
+        if (!confirm(`Discard the unsaved ${draftCategoryLabelFor(currentCategory).toLowerCase()} draft and start a new ${draftCategoryLabelFor(nextCategory).toLowerCase()}?`)) {
+          return;
+        }
+      }
+
       state.activeCategory = 'all';
-      state.draftItem = state.draftItem || createDraftItem();
+      if (!state.draftItem || currentCategory !== nextCategory) {
+        state.draftItem = createDraftItem(nextCategory);
+        state.draftComponents = [];
+        state.draftComponentId = '';
+        state.draftComponentQty = '1';
+        state.draftImageFile = null;
+      }
       state.draftComponents = state.draftComponents || [];
       syncTabs();
       renderItems(filteredItems());
+      setStatus(`${draftCategoryLabelFor(nextCategory)} draft ready. Inventory stays visible below while you build it.`, 'ok');
       focusDraftField();
     }
 
@@ -3292,7 +3391,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
       const payload = {
         id: String(state.draftItem.id || '').trim(),
-        category: normalize(state.draftItem.category) || 'part',
+        category: draftCategoryValue(state.draftItem.category),
         part_name: String(state.draftItem.part_name || '').trim(),
         color: String(state.draftItem.color || '').trim(),
         material: String(state.draftItem.material || '').trim(),
@@ -3387,10 +3486,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     function draftComponentCandidates() {
       const draftId = normalize(state.draftItem ? state.draftItem.id : '');
-      const selectedIds = new Set((state.draftComponents || []).map((component) => normalize(component.id)));
       return [...state.items]
         .filter((item) => ['part', 'kit'].includes(normalize(item.category)))
-        .filter((item) => normalize(item.id) && normalize(item.id) !== draftId && !selectedIds.has(normalize(item.id)))
+        .filter((item) => normalize(item.id) && normalize(item.id) !== draftId)
         .sort((a, b) => {
           const categoryCompare = normalize(a.category || '').localeCompare(normalize(b.category || ''));
           if (categoryCompare !== 0) {
@@ -3406,15 +3504,21 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     function draftComponentOptionsHtml() {
       const options = draftComponentCandidates();
-      const selectedId = String(state.draftComponentId || '').trim();
-      const optionHtml = options.map((item) => {
+      return options.map((item) => {
         const id = String(item.id || '').trim();
-        const selected = id === selectedId ? ' selected' : '';
         const category = item.category_label || item.category || 'item';
-        const label = `${id} - ${item.part_name || 'Unnamed'} [${category}] stock ${item.qty || 0}`;
-        return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(label)}</option>`;
+        const label = `${item.part_name || 'Unnamed'} [${category}] stock ${item.qty || 0}`;
+        return `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`;
       }).join('');
-      return `<option value="">Select a part or kit</option>${optionHtml}`;
+    }
+
+    function findDraftComponentCandidate(componentId) {
+      const lookup = normalize(componentId);
+      if (!lookup) {
+        return null;
+      }
+
+      return draftComponentCandidates().find((item) => normalize(item.id || '') === lookup) || null;
     }
 
     function draftComponentsPayload() {
@@ -3439,9 +3543,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
             <div class="kit-component-editor">
               <label>
                 <span>Product / kit components</span>
-                <select data-draft-component-select>
+                <input data-draft-component-select type="text" list="draft-component-options" placeholder="Paste existing part or kit number" value="${escapeHtml(state.draftComponentId || '')}" autocomplete="off" spellcheck="false">
+                <datalist id="draft-component-options">
                   ${draftComponentOptionsHtml()}
-                </select>
+                </datalist>
               </label>
               <label>
                 <span>Qty per parent</span>
@@ -3449,7 +3554,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
               </label>
               <button type="button" class="secondary" data-draft-component-add${candidates.length ? '' : ' disabled'}>Add Component</button>
             </div>
-            <div class="cell-note">Choose existing parts or kits to link as this product or kit's components. Linked quantities move with this item's stock.</div>
+            <div class="cell-note">Paste an existing part number or kit number, or pick from suggestions. The full inventory stays visible below while you build this ${escapeHtml(draftCategoryLabelFor(state.draftItem.category).toLowerCase())}.</div>
             <div class="kit-component-list">
               ${selected.length ? selected.map((component, index) => `
                 <span class="kit-component-pill">
@@ -3472,7 +3577,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const componentId = String(state.draftComponentId || '').trim();
       const qty = toWholeNumber(state.draftComponentQty, 1);
       if (!componentId) {
-        setStatus('Choose a part or kit to add as a component.', 'error');
+        setStatus('Enter a part number or kit number to add as a component.', 'error');
         return;
       }
       if (qty <= 0) {
@@ -3480,15 +3585,24 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         return;
       }
 
-      const existing = (state.draftComponents || []).find((component) => normalize(component.id) === normalize(componentId));
+      const candidate = findDraftComponentCandidate(componentId);
+      if (!candidate) {
+        setStatus('Enter an existing part number or kit number from inventory.', 'error');
+        return;
+      }
+
+      const resolvedId = String(candidate.id || '').trim();
+
+      const existing = (state.draftComponents || []).find((component) => normalize(component.id) === normalize(resolvedId));
       if (existing) {
         existing.qty = qty;
       } else {
-        state.draftComponents.push({ id: componentId, qty });
+        state.draftComponents.push({ id: resolvedId, qty });
       }
       state.draftComponentId = '';
       state.draftComponentQty = '1';
       renderItems(filteredItems());
+      focusDraftField('[data-draft-component-select]');
     }
 
     function removeDraftComponent(index) {
@@ -3505,20 +3619,20 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         return null;
       }
 
+      const draftCategory = draftCategoryValue(state.draftItem.category);
       const row = document.createElement('tr');
       row.className = 'draft-row';
       row.innerHTML = `
         <td>
           <div class="cell-stack">
-            <input data-draft-field="id" type="text" placeholder="Part number" value="${escapeHtml(state.draftItem.id)}" required>
+            <div class="cell-note">${escapeHtml(draftIdentifierLabelFor(draftCategory))}</div>
+            <input data-draft-field="id" type="text" placeholder="${escapeHtml(draftIdentifierLabelFor(draftCategory))}" value="${escapeHtml(state.draftItem.id)}" required>
           </div>
         </td>
         <td>
           <div class="cell-stack">
-            <select data-draft-category>
-              ${categoryOptionsHtml(state.draftItem.category)}
-            </select>
-            <div class="cell-note">Supported categories: product, part, kit.</div>
+            <div class="draft-category-display">${escapeHtml(draftCategoryLabelFor(draftCategory))}</div>
+            <div class="cell-note">${escapeHtml(draftActionNoteFor(draftCategory))}</div>
           </div>
         </td>
         <td>
@@ -4751,7 +4865,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         ordersTabBtn.addEventListener('click', () => {
           window.location.href = '/orders';
         });
-        addRowBtn.addEventListener('click', openDraftRow);
+        addRowBtn.addEventListener('click', () => openDraftRow('part'));
+        addKitBtn.addEventListener('click', () => openDraftRow('kit'));
+        addProductBtn.addEventListener('click', () => openDraftRow('product'));
 
         document.getElementById('remove-form').addEventListener('submit', async (event) => {
           try {
@@ -4855,6 +4971,11 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           return;
         }
 
+        if (event.target.hasAttribute('data-draft-component-select')) {
+          state.draftComponentId = event.target.value || '';
+          return;
+        }
+
         if (event.target.hasAttribute('data-draft-component-qty')) {
           state.draftComponentQty = event.target.value || '1';
           return;
@@ -4875,21 +4996,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           state.draftImageFile = event.target.files && event.target.files[0] ? event.target.files[0] : null;
           if (state.draftImageFile) {
             state.draftItem.image_ref = '';
-          }
-          renderItems(filteredItems());
-          return;
-        }
-
-        if (event.target.hasAttribute('data-draft-category')) {
-          state.draftItem.category = event.target.value || 'part';
-          if (normalize(state.draftItem.category) === 'product') {
-            state.draftItem.bom_product = '';
-            state.draftItem.bom_qty = '0';
-          }
-          if (!['product', 'kit'].includes(normalize(state.draftItem.category))) {
-            state.draftComponents = [];
-            state.draftComponentId = '';
-            state.draftComponentQty = '1';
           }
           renderItems(filteredItems());
           return;
