@@ -1445,6 +1445,35 @@ class DesktopStore:
                 continue
             self.collect_linked_stock_deltas(component, delta * component_qty, totals, path, rows)
 
+    def collect_inventory_component_deltas(
+        self,
+        parent: ItemRecord,
+        delta: int,
+        totals: dict[str, int],
+        path: set[str] | None = None,
+        items: list[ItemRecord] | None = None,
+    ) -> None:
+        if delta == 0:
+            return
+        rows = self.items if items is None else items
+        path = set(path or set())
+        parent_key = normalize_lookup_value(parent.id)
+        if parent_key in path:
+            raise ValueError("BOM cycle detected while applying linked inventory changes.")
+        path.add(parent_key)
+        for component in rows:
+            if not self.is_bom_component_of(component, parent):
+                continue
+            component_qty = max(0, int(component.bom_qty or 0))
+            if component_qty <= 0:
+                continue
+            component_delta = delta * component_qty
+            if normalize_category(component.category) == "part":
+                component_key = normalize_lookup_value(component.id)
+                totals[component_key] = totals.get(component_key, 0) + component_delta
+            if self.item_can_have_bom(component):
+                self.collect_inventory_component_deltas(component, component_delta, totals, path, rows)
+
     def collect_linked_stock_totals(
         self,
         roots: list[tuple[ItemRecord, int]],
@@ -1455,6 +1484,25 @@ class DesktopStore:
         try:
             for item, delta in roots:
                 self.collect_linked_stock_deltas(item, delta, totals, items=rows)
+        except ValueError as exc:
+            return {}, str(exc)
+        return totals, ""
+
+    def collect_inventory_stock_totals(
+        self,
+        roots: list[tuple[ItemRecord, int]],
+        items: list[ItemRecord] | None = None,
+    ) -> tuple[dict[str, int], str]:
+        totals: dict[str, int] = {}
+        rows = self.items if items is None else items
+        try:
+            for item, delta in roots:
+                if delta == 0:
+                    continue
+                item_key = normalize_lookup_value(item.id)
+                totals[item_key] = totals.get(item_key, 0) + delta
+                if self.item_can_have_bom(item):
+                    self.collect_inventory_component_deltas(item, -delta, totals, items=rows)
         except ValueError as exc:
             return {}, str(exc)
         return totals, ""
@@ -1470,6 +1518,15 @@ class DesktopStore:
 
     def plan_linked_stock_changes(self, roots: list[tuple[ItemRecord, int]]) -> tuple[dict[str, int], str]:
         totals, error = self.collect_linked_stock_totals(roots)
+        if error:
+            return {}, error
+        validation_error = self.validate_stock_deltas(totals)
+        if validation_error:
+            return {}, validation_error
+        return totals, ""
+
+    def plan_inventory_stock_changes(self, roots: list[tuple[ItemRecord, int]]) -> tuple[dict[str, int], str]:
+        totals, error = self.collect_inventory_stock_totals(roots)
         if error:
             return {}, error
         validation_error = self.validate_stock_deltas(totals)
@@ -4553,7 +4610,11 @@ document.getElementById('category').addEventListener('change',load);document.get
                 roots.append((store.items[idx], -needed))
 
             updated_at = current_timestamp()
-            deltas, delta_error = store.plan_linked_stock_changes(roots)
+            deltas: dict[str, int] = {}
+            for item, delta in roots:
+                item_key = normalize_lookup_value(item.id)
+                deltas[item_key] = deltas.get(item_key, 0) + delta
+            delta_error = store.validate_stock_deltas(deltas)
             if delta_error:
                 return json_error(409, delta_error)
             store.apply_stock_deltas(deltas, updated_at)
@@ -4760,7 +4821,7 @@ document.getElementById('category').addEventListener('change',load);document.get
             if component_error:
                 store.items = rollback
                 return json_error(400, component_error)
-            deltas, delta_error = store.plan_linked_stock_changes([(item, qty_parsed)])
+            deltas, delta_error = store.plan_inventory_stock_changes([(item, qty_parsed)])
             if delta_error:
                 store.items = rollback
                 return json_error(400, delta_error)
@@ -4827,7 +4888,7 @@ document.getElementById('category').addEventListener('change',load);document.get
                 return json_error(400, component_error)
             if components and category not in {"product", "kit"}:
                 return json_error(400, "Only products and kits can own BOM components.")
-            old_totals, delta_error = store.collect_linked_stock_totals([(previous, previous.qty)], items=rollback)
+            old_totals, delta_error = store.collect_inventory_stock_totals([(previous, previous.qty)], items=rollback)
             if delta_error:
                 return json_error(400, delta_error)
             item = store.items[idx]
@@ -4846,7 +4907,7 @@ document.getElementById('category').addEventListener('change',load);document.get
             if component_error:
                 store.items = rollback
                 return json_error(400, component_error)
-            new_totals, delta_error = store.collect_linked_stock_totals([(item, qty)])
+            new_totals, delta_error = store.collect_inventory_stock_totals([(item, qty)])
             if delta_error:
                 store.items = rollback
                 return json_error(400, delta_error)
@@ -4912,7 +4973,7 @@ document.getElementById('category').addEventListener('change',load);document.get
             store.create_backup_zip("before_delete_item")
             rollback = [ItemRecord(**asdict(row)) for row in store.items]
             removed = ItemRecord(**asdict(store.items[idx]))
-            deltas, delta_error = store.plan_linked_stock_changes([(store.items[idx], -removed.qty)])
+            deltas, delta_error = store.plan_inventory_stock_changes([(store.items[idx], -removed.qty)])
             if delta_error:
                 return json_error(400, delta_error)
             store.apply_stock_deltas(deltas, current_timestamp())
@@ -4947,7 +5008,7 @@ document.getElementById('category').addEventListener('change',load);document.get
                 return json_error(404, "Item not found.")
             rollback = [ItemRecord(**asdict(row)) for row in store.items]
             new_qty = store.items[idx].qty + delta
-            deltas, delta_error = store.plan_linked_stock_changes([(store.items[idx], delta)])
+            deltas, delta_error = store.plan_inventory_stock_changes([(store.items[idx], delta)])
             if delta_error:
                 return json_error(400, delta_error)
             updated_at = current_timestamp()
@@ -4983,7 +5044,7 @@ document.getElementById('category').addEventListener('change',load);document.get
             rollback = [ItemRecord(**asdict(row)) for row in store.items]
             previous_qty = store.items[idx].qty
             delta = qty - previous_qty
-            deltas, delta_error = store.plan_linked_stock_changes([(store.items[idx], delta)])
+            deltas, delta_error = store.plan_inventory_stock_changes([(store.items[idx], delta)])
             if delta_error:
                 return json_error(400, delta_error)
             updated_at = current_timestamp()
