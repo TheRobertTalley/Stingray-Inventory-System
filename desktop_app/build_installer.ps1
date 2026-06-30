@@ -94,6 +94,7 @@ $pyInstallerArgs = @(
   "-m", "PyInstaller",
   "--noconfirm",
   "--clean",
+  "--noconsole",
   "--onedir",
   "--name", "StingrayInventoryDesktop",
   "--distpath", $distDir,

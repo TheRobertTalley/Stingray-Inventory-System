@@ -119,6 +119,88 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(client.get("/api/item?id=SUBKIT").get_json()["item"]["qty"], 0)
         self.assertEqual(client.get("/api/item?id=SUBPART").get_json()["item"]["qty"], 46)
 
+    def test_shared_part_stays_linked_to_multiple_kits_after_reload(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        firmware_ino = Path(__file__).resolve().parents[1] / "firmware" / "StingrayInventoryESP32" / "StingrayInventoryESP32.ino"
+        data_dir = Path(tmp.name) / "ProgramData" / "Inventory" / "data"
+
+        app1, _ = create_app(data_dir, firmware_ino=firmware_ino, bind_host="0.0.0.0", port=8787)
+        client1 = app1.test_client()
+        self.assertEqual(client1.post("/api/items/add", json={"id": "SHARED", "part_name": "Shared Part", "qty": "100"}).status_code, 201)
+        self.assertEqual(client1.post("/api/items/add", json={"id": "ONLY1", "part_name": "Only One", "qty": "100"}).status_code, 201)
+        self.assertEqual(client1.post("/api/items/add", json={"id": "ONLY2", "part_name": "Only Two", "qty": "100"}).status_code, 201)
+        self.assertEqual(
+            client1.post(
+                "/api/items/add",
+                json={"id": "KIT1", "category": "kit", "part_name": "Kit One", "qty": "1", "components": "SHARED|2\nONLY1|1"},
+            ).status_code,
+            201,
+        )
+        self.assertEqual(
+            client1.post(
+                "/api/items/add",
+                json={"id": "KIT2", "category": "kit", "part_name": "Kit Two", "qty": "1", "components": "SHARED|3\nONLY2|1"},
+            ).status_code,
+            201,
+        )
+
+        kit1_payload = client1.get("/api/item?id=KIT1").get_json()
+        kit2_payload = client1.get("/api/item?id=KIT2").get_json()
+        self.assertEqual({component["id"] for component in kit1_payload["bom_components"]}, {"SHARED", "ONLY1"})
+        self.assertEqual({component["id"] for component in kit2_payload["bom_components"]}, {"SHARED", "ONLY2"})
+        self.assertEqual(client1.get("/api/item?id=SHARED").get_json()["item"]["qty"], 95)
+
+        app2, _ = create_app(data_dir, firmware_ino=firmware_ino, bind_host="0.0.0.0", port=8787)
+        client2 = app2.test_client()
+        kit1_payload = client2.get("/api/item?id=KIT1").get_json()
+        kit2_payload = client2.get("/api/item?id=KIT2").get_json()
+        self.assertEqual({component["id"] for component in kit1_payload["bom_components"]}, {"SHARED", "ONLY1"})
+        self.assertEqual({component["id"] for component in kit2_payload["bom_components"]}, {"SHARED", "ONLY2"})
+        self.assertEqual(client2.get("/api/item?id=SHARED").get_json()["item"]["qty"], 95)
+
+        adjusted = client2.post("/api/items/adjust", json={"id": "KIT1", "delta": "-1"})
+        self.assertEqual(adjusted.status_code, 200)
+        self.assertEqual(client2.get("/api/item?id=SHARED").get_json()["item"]["qty"], 97)
+        self.assertEqual({component["id"] for component in client2.get("/api/item?id=KIT2").get_json()["bom_components"]}, {"SHARED", "ONLY2"})
+
+    def test_updating_one_shared_kit_keeps_shared_part_in_other_kit(self):
+        client, _ = self.make_client()
+        self.assertEqual(client.post("/api/items/add", json={"id": "SHARED", "part_name": "Shared Part", "qty": "100"}).status_code, 201)
+        self.assertEqual(client.post("/api/items/add", json={"id": "ONLY1", "part_name": "Only One", "qty": "100"}).status_code, 201)
+        self.assertEqual(client.post("/api/items/add", json={"id": "ONLY2", "part_name": "Only Two", "qty": "100"}).status_code, 201)
+        self.assertEqual(
+            client.post(
+                "/api/items/add",
+                json={"id": "KIT1", "category": "kit", "part_name": "Kit One", "qty": "1", "components": "SHARED|2\nONLY1|1"},
+            ).status_code,
+            201,
+        )
+        self.assertEqual(
+            client.post(
+                "/api/items/add",
+                json={"id": "KIT2", "category": "kit", "part_name": "Kit Two", "qty": "1", "components": "SHARED|3\nONLY2|1"},
+            ).status_code,
+            201,
+        )
+
+        updated = client.post(
+            "/api/items/update",
+            json={
+                "original_id": "KIT1",
+                "id": "KIT1",
+                "category": "kit",
+                "part_name": "Kit One",
+                "qty": "1",
+                "components": "SHARED|4\nONLY1|1",
+                "bom_qty": "0",
+            },
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual({component["id"] for component in client.get("/api/item?id=KIT1").get_json()["bom_components"]}, {"SHARED", "ONLY1"})
+        self.assertEqual({component["id"] for component in client.get("/api/item?id=KIT2").get_json()["bom_components"]}, {"SHARED", "ONLY2"})
+        self.assertEqual(client.get("/api/item?id=SHARED").get_json()["item"]["qty"], 93)
+
     def test_item_update_replaces_product_bom_components_and_recalculates_linked_stock(self):
         client, _ = self.make_client()
         client.post("/api/items/add", json={"id": "BASE1", "part_name": "Base 1", "qty": "20"})
@@ -176,7 +258,34 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(fulfilled.status_code, 200)
         self.assertEqual(fulfilled.get_json()["units_removed"], 1)
         self.assertEqual(client.get("/api/item?id=KIT").get_json()["item"]["qty"], 1)
-        self.assertEqual(client.get("/api/item?id=PART").get_json()["item"]["qty"], 16)
+        self.assertEqual(client.get("/api/item?id=PART").get_json()["item"]["qty"], 14)
+
+    def test_order_fulfillment_deducts_nested_product_components(self):
+        client, _ = self.make_client()
+        client.post("/api/items/add", json={"id": "PARTA", "part_name": "Part A", "qty": "80"})
+        client.post("/api/items/add", json={"id": "PARTB", "part_name": "Part B", "qty": "60"})
+        client.post("/api/items/add", json={"id": "PARTC", "part_name": "Part C", "qty": "100"})
+        client.post("/api/items/add", json={"id": "SUBKIT", "category": "kit", "part_name": "Sub Kit", "qty": "0", "components": "PARTC|2"})
+        client.post(
+            "/api/items/add",
+            json={"id": "KITALPHA", "category": "kit", "part_name": "Kit Alpha", "qty": "3", "components": "PARTA|4\nSUBKIT|1"},
+        )
+        client.post(
+            "/api/items/add",
+            json={"id": "PROD", "category": "product", "part_name": "Product", "qty": "2", "components": "KITALPHA|1\nPARTB|5"},
+        )
+
+        fulfilled = client.post(
+            "/api/orders/fulfill",
+            json={"order_number": "ORD-PROD", "plan": "PROD|1", "orders_payload": '{"orders":[]}'},
+        )
+        self.assertEqual(fulfilled.status_code, 200)
+        self.assertEqual(fulfilled.get_json()["units_removed"], 1)
+        self.assertEqual(client.get("/api/item?id=PROD").get_json()["item"]["qty"], 1)
+        self.assertEqual(client.get("/api/item?id=KITALPHA").get_json()["item"]["qty"], 3)
+        self.assertEqual(client.get("/api/item?id=PARTA").get_json()["item"]["qty"], 56)
+        self.assertEqual(client.get("/api/item?id=PARTB").get_json()["item"]["qty"], 45)
+        self.assertEqual(client.get("/api/item?id=PARTC").get_json()["item"]["qty"], 88)
 
     def test_item_image_add_replace_remove(self):
         client, _ = self.make_client()

@@ -30,7 +30,7 @@ import qrcode.image.svg
 from flask import Flask, Response, has_request_context, jsonify, request, send_file, session
 
 
-INVENTORY_HEADER = "part_number|category|part_name|qr_code|color|material|qty|image_ref|bom_product|bom_qty|updated_at"
+INVENTORY_HEADER = "part_number|category|part_name|qr_code|color|material|qty|image_ref|bom_product|bom_qty|updated_at|bom_links"
 TRANSACTION_HEADER = "timestamp|item_id|action|delta|qty_after|note"
 DEVICE_LOG_HEADER = "timestamp|mac_address|uptime_seconds|event|detail"
 TIME_LOG_HEADER = "timestamp|event|detail"
@@ -138,6 +138,7 @@ class ItemRecord:
     bom_product: str
     bom_qty: int
     updated_at: str
+    bom_links: str = ""
 
 
 @dataclass
@@ -239,6 +240,59 @@ def parse_int(value: str) -> int | None:
     if not text.isdigit():
         return None
     return sign * int(text)
+
+
+def normalize_bom_links(links: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    ordered_keys: list[str] = []
+    normalized: dict[str, tuple[str, int]] = {}
+    for raw_target, raw_qty in links:
+        target = trim_copy(str(raw_target))
+        qty = raw_qty if isinstance(raw_qty, int) else parse_int(str(raw_qty))
+        if not target or qty is None or qty <= 0:
+            continue
+        key = normalize_lookup_value(target)
+        if key not in normalized:
+            ordered_keys.append(key)
+        normalized[key] = (target, qty)
+    return [normalized[key] for key in ordered_keys]
+
+
+def encode_bom_links(links: list[tuple[str, int]]) -> str:
+    return ";".join(f"{quote(target, safe='-_.~')}~{qty}" for target, qty in normalize_bom_links(links))
+
+
+def decode_bom_links(raw_links: str) -> list[tuple[str, int]]:
+    links: list[tuple[str, int]] = []
+    for raw_entry in (raw_links or "").split(";"):
+        entry = trim_copy(raw_entry)
+        if not entry or "~" not in entry:
+            continue
+        encoded_target, qty_text = entry.rsplit("~", 1)
+        target = trim_copy(unquote(encoded_target))
+        qty = parse_int(qty_text)
+        if not target or qty is None or qty <= 0:
+            continue
+        links.append((target, qty))
+    return normalize_bom_links(links)
+
+
+def effective_bom_links(item: ItemRecord) -> list[tuple[str, int]]:
+    links = decode_bom_links(item.bom_links)
+    if links:
+        return links
+    if trim_copy(item.bom_product) and int(item.bom_qty or 0) > 0:
+        return normalize_bom_links([(item.bom_product, int(item.bom_qty))])
+    return []
+
+
+def primary_bom_link(item: ItemRecord, preferred_parent: str = "") -> tuple[str, int]:
+    links = effective_bom_links(item)
+    preferred_key = normalize_lookup_value(preferred_parent or item.bom_product)
+    if preferred_key:
+        for target, qty in links:
+            if normalize_lookup_value(target) == preferred_key:
+                return target, qty
+    return links[0] if links else ("", 0)
 
 
 def current_timestamp() -> str:
@@ -491,6 +545,7 @@ def parse_inventory_line(line: str) -> ItemRecord | None:
         bom_product="",
         bom_qty=0,
         updated_at="",
+        bom_links="",
     )
 
     if len(fields) >= 11:
@@ -508,6 +563,8 @@ def parse_inventory_line(line: str) -> ItemRecord | None:
         item.bom_product = fields[8]
         item.bom_qty = bom_qty
         item.updated_at = fields[10]
+        if len(fields) >= 12:
+            item.bom_links = fields[11]
         return item
 
     if len(fields) >= 10:
@@ -565,6 +622,7 @@ def is_inventory_header_line(line: str) -> bool:
         "bom_product",
         "bom_qty",
         "updated_at",
+        "bom_links",
     }
     matches = sum(1 for field in fields if field in header_tokens)
     return fields[0] in {"part_number", "id"} or (matches >= 2 and any(field in {"qty", "quantity"} for field in fields))
@@ -890,6 +948,8 @@ class DesktopStore:
     def _write_inventory_file(self, items: list[ItemRecord]) -> None:
         lines = [INVENTORY_HEADER]
         for item in items:
+            bom_links = effective_bom_links(item)
+            primary_parent, primary_qty = primary_bom_link(item)
             lines.append(
                 "|".join(
                     [
@@ -901,9 +961,10 @@ class DesktopStore:
                         sanitize_field(item.material),
                         str(item.qty),
                         sanitize_field(item.image_ref),
-                        sanitize_field(item.bom_product),
-                        str(item.bom_qty),
+                        sanitize_field(primary_parent),
+                        str(primary_qty),
                         sanitize_field(item.updated_at),
+                        sanitize_field(encode_bom_links(bom_links)),
                     ]
                 )
             )
@@ -1294,6 +1355,57 @@ class DesktopStore:
     def item_can_be_bom_component(self, item: ItemRecord) -> bool:
         return normalize_category(item.category) in {"part", "kit"}
 
+    def bom_links_for_item(self, item: ItemRecord) -> list[tuple[str, int]]:
+        return effective_bom_links(item)
+
+    def sync_item_bom_links(self, item: ItemRecord, links: list[tuple[str, int]], preferred_parent: str = "") -> None:
+        normalized = normalize_bom_links(links)
+        preferred_key = normalize_lookup_value(preferred_parent or item.bom_product)
+        primary_parent = ""
+        primary_qty = 0
+        if preferred_key:
+            for target, qty in normalized:
+                if normalize_lookup_value(target) == preferred_key:
+                    primary_parent = target
+                    primary_qty = qty
+                    break
+        if not primary_parent and normalized:
+            primary_parent, primary_qty = normalized[0]
+        item.bom_links = encode_bom_links(normalized)
+        item.bom_product = primary_parent
+        item.bom_qty = primary_qty
+
+    def bom_link_matches_parent(self, link_parent: str, parent: ItemRecord) -> bool:
+        target = normalize_lookup_value(link_parent)
+        if not target:
+            return False
+        parent_id = normalize_lookup_value(parent.id)
+        parent_name = normalize_lookup_value(parent.part_name)
+        return target == parent_id or (bool(parent_name) and target == parent_name)
+
+    def filter_bom_links(
+        self,
+        links: list[tuple[str, int]],
+        parent: ItemRecord | None = None,
+        parent_lookup: str = "",
+    ) -> list[tuple[str, int]]:
+        lookup_key = normalize_lookup_value(parent_lookup)
+        kept: list[tuple[str, int]] = []
+        for target, qty in normalize_bom_links(links):
+            if parent and self.bom_link_matches_parent(target, parent):
+                continue
+            if lookup_key and normalize_lookup_value(target) == lookup_key:
+                continue
+            kept.append((target, qty))
+        return kept
+
+    def component_qty_for_parent(self, component: ItemRecord, parent: ItemRecord) -> int:
+        qty = 0
+        for target, link_qty in self.bom_links_for_item(component):
+            if self.bom_link_matches_parent(target, parent):
+                qty = max(0, int(link_qty or 0))
+        return qty
+
     def bom_components_for_parent(self, parent: ItemRecord, items: list[ItemRecord] | None = None) -> list[ItemRecord]:
         rows = self.items if items is None else items
         return [component for component in rows if self.is_bom_component_of(component, parent)]
@@ -1303,10 +1415,23 @@ class DesktopStore:
             return False
         if normalize_lookup_value(component.id) == normalize_lookup_value(parent.id):
             return False
-        component_parent = normalize_lookup_value(component.bom_product)
-        parent_id = normalize_lookup_value(parent.id)
-        parent_name = normalize_lookup_value(parent.part_name)
-        return bool(component_parent) and (component_parent == parent_id or component_parent == parent_name)
+        return self.component_qty_for_parent(component, parent) > 0
+
+    def bom_path_contains(self, parent: ItemRecord, wanted_component_key: str, path: set[str] | None = None) -> bool:
+        parent_key = normalize_lookup_value(parent.id)
+        if not parent_key:
+            return False
+        path = set(path or set())
+        if parent_key in path:
+            return False
+        path.add(parent_key)
+        for component in self.bom_components_for_parent(parent):
+            component_key = normalize_lookup_value(component.id)
+            if component_key == wanted_component_key:
+                return True
+            if self.item_can_have_bom(component) and self.bom_path_contains(component, wanted_component_key, path):
+                return True
+        return False
 
     def bom_assignment_error(self, component_id: str, component_category: str, parent_lookup: str) -> str:
         parent_text = trim_copy(parent_lookup)
@@ -1324,17 +1449,10 @@ class DesktopStore:
         parent_key = normalize_lookup_value(parent.id)
         if component_key and component_key == parent_key:
             return "An item cannot contain itself as a component."
-        seen = {component_key}
-        cursor = parent
-        while trim_copy(cursor.bom_product):
-            cursor_idx = self.find_item_index_by_lookup(cursor.bom_product)
-            if cursor_idx < 0:
-                break
-            cursor = self.items[cursor_idx]
-            cursor_key = normalize_lookup_value(cursor.id)
-            if cursor_key in seen:
+        component_idx = self.find_item_index(component_id)
+        if component_idx >= 0 and self.item_can_have_bom(self.items[component_idx]):
+            if self.bom_path_contains(self.items[component_idx], parent_key):
                 return "This BOM link would create a component cycle."
-            seen.add(cursor_key)
         return ""
 
     def parse_component_links(self, raw_components: str) -> tuple[list[tuple[str, int]], str]:
@@ -1379,8 +1497,9 @@ class DesktopStore:
             error = self.bom_assignment_error(component.id, component.category, parent.id)
             if error:
                 return error
-            component.bom_product = parent.id
-            component.bom_qty = qty
+            links = self.filter_bom_links(self.bom_links_for_item(component), parent=parent)
+            links.append((parent.id, qty))
+            self.sync_item_bom_links(component, links, preferred_parent=parent.id)
             component.updated_at = current_timestamp()
         return ""
 
@@ -1395,10 +1514,12 @@ class DesktopStore:
         timestamp = current_timestamp()
         selected = {normalize_lookup_value(component_id): qty for component_id, qty in components}
         for component in self.bom_components_for_parent(previous_parent):
+            links = self.filter_bom_links(self.bom_links_for_item(component), parent=previous_parent)
             if normalize_lookup_value(component.id) in selected:
-                continue
-            component.bom_product = ""
-            component.bom_qty = 0
+                links.append((parent.id, selected[normalize_lookup_value(component.id)]))
+                self.sync_item_bom_links(component, links, preferred_parent=parent.id)
+            else:
+                self.sync_item_bom_links(component, links)
             component.updated_at = timestamp
         if not components:
             return ""
@@ -1413,10 +1534,30 @@ class DesktopStore:
             error = self.bom_assignment_error(component.id, component.category, parent.id)
             if error:
                 return error
-            component.bom_product = parent.id
-            component.bom_qty = qty
+            links = self.filter_bom_links(self.bom_links_for_item(component), parent=parent)
+            links.append((parent.id, qty))
+            self.sync_item_bom_links(component, links, preferred_parent=parent.id)
             component.updated_at = timestamp
         return ""
+
+    def set_item_parent_assignment(
+        self,
+        item: ItemRecord,
+        previous_parent_lookup: str,
+        new_parent_lookup: str,
+        qty: int,
+    ) -> None:
+        previous_parent_idx = self.find_item_index_by_lookup(previous_parent_lookup)
+        previous_parent = self.items[previous_parent_idx] if previous_parent_idx >= 0 else None
+        links = self.filter_bom_links(self.bom_links_for_item(item), parent=previous_parent, parent_lookup=previous_parent_lookup)
+        if new_parent_lookup and qty > 0:
+            new_parent_idx = self.find_item_index_by_lookup(new_parent_lookup)
+            new_parent = self.items[new_parent_idx] if new_parent_idx >= 0 else None
+            links = self.filter_bom_links(links, parent=new_parent, parent_lookup=new_parent_lookup)
+            links.append(((new_parent.id if new_parent else new_parent_lookup), qty))
+            self.sync_item_bom_links(item, links, preferred_parent=(new_parent.id if new_parent else new_parent_lookup))
+            return
+        self.sync_item_bom_links(item, links)
 
     def collect_linked_stock_deltas(
         self,
@@ -1440,7 +1581,7 @@ class DesktopStore:
         for component in rows:
             if not self.is_bom_component_of(component, item):
                 continue
-            component_qty = max(0, int(component.bom_qty or 0))
+            component_qty = self.component_qty_for_parent(component, item)
             if component_qty <= 0:
                 continue
             self.collect_linked_stock_deltas(component, delta * component_qty, totals, path, rows)
@@ -1464,7 +1605,7 @@ class DesktopStore:
         for component in rows:
             if not self.is_bom_component_of(component, parent):
                 continue
-            component_qty = max(0, int(component.bom_qty or 0))
+            component_qty = self.component_qty_for_parent(component, parent)
             if component_qty <= 0:
                 continue
             component_delta = delta * component_qty
@@ -1507,6 +1648,25 @@ class DesktopStore:
             return {}, str(exc)
         return totals, ""
 
+    def collect_fulfillment_stock_totals(
+        self,
+        roots: list[tuple[ItemRecord, int]],
+        items: list[ItemRecord] | None = None,
+    ) -> tuple[dict[str, int], str]:
+        totals: dict[str, int] = {}
+        rows = self.items if items is None else items
+        try:
+            for item, delta in roots:
+                if delta == 0:
+                    continue
+                item_key = normalize_lookup_value(item.id)
+                totals[item_key] = totals.get(item_key, 0) + delta
+                if self.item_can_have_bom(item):
+                    self.collect_inventory_component_deltas(item, delta, totals, items=rows)
+        except ValueError as exc:
+            return {}, str(exc)
+        return totals, ""
+
     def validate_stock_deltas(self, deltas: dict[str, int]) -> str:
         for item_key, delta in deltas.items():
             idx = self.find_item_index(item_key)
@@ -1534,6 +1694,15 @@ class DesktopStore:
             return {}, validation_error
         return totals, ""
 
+    def plan_fulfillment_stock_changes(self, roots: list[tuple[ItemRecord, int]]) -> tuple[dict[str, int], str]:
+        totals, error = self.collect_fulfillment_stock_totals(roots)
+        if error:
+            return {}, error
+        validation_error = self.validate_stock_deltas(totals)
+        if validation_error:
+            return {}, validation_error
+        return totals, ""
+
     def apply_stock_deltas(self, deltas: dict[str, int], updated_at: str) -> None:
         for item_key, delta in deltas.items():
             if delta == 0:
@@ -1545,6 +1714,7 @@ class DesktopStore:
             self.items[idx].updated_at = updated_at
 
     def item_to_dict(self, item: ItemRecord, base_url: str) -> dict[str, Any]:
+        primary_parent, primary_qty = primary_bom_link(item)
         return {
             "id": item.id,
             "category": normalize_category(item.category),
@@ -1555,8 +1725,9 @@ class DesktopStore:
             "material": item.material,
             "qty": item.qty,
             "image_ref": item.image_ref,
-            "bom_product": item.bom_product,
-            "bom_qty": item.bom_qty,
+            "bom_product": primary_parent,
+            "bom_qty": primary_qty,
+            "bom_parent_count": len(self.bom_links_for_item(item)),
             "has_bom": self.item_can_have_bom(item),
             "updated_at": item.updated_at,
             "stock_zero": item.qty == 0,
@@ -1575,6 +1746,7 @@ class DesktopStore:
         search = lower_copy(trim_copy(raw_search))
         if not search:
             return True
+        primary_parent, primary_qty = primary_bom_link(item)
         haystack = " ".join(
             [
                 item.id,
@@ -1584,8 +1756,9 @@ class DesktopStore:
                 item.color,
                 item.material,
                 item.image_ref,
-                item.bom_product,
-                str(item.bom_qty),
+                primary_parent,
+                str(primary_qty),
+                " ".join(target for target, _ in self.bom_links_for_item(item)),
             ]
         ).lower()
         return search in haystack
@@ -2991,6 +3164,191 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
       color: #9d2020;
       border-color: rgba(190, 44, 44, 0.28);
     }
+    #desktop-edit-panel {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: 1fr;
+      padding: 1.15rem;
+      background: linear-gradient(145deg, #fbfeff, #f2f7fb);
+    }
+    #desktop-edit-panel > * {
+      grid-column: 1 / -1;
+      min-width: 0;
+    }
+    #desktop-edit-panel h2 {
+      margin: 0;
+      font-size: 1.15rem;
+    }
+    .desktop-edit-head {
+      display: grid;
+      gap: 0.3rem;
+    }
+    .desktop-edit-copy {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .desktop-edit-layout {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: minmax(0, 1.18fr) minmax(300px, 0.92fr);
+      align-items: start;
+    }
+    .desktop-edit-form,
+    .desktop-edit-components {
+      display: grid;
+      gap: 0.85rem;
+      min-width: 0;
+    }
+    .desktop-edit-fields {
+      display: grid;
+      gap: 0.8rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    #desktop-edit-panel label {
+      display: grid;
+      gap: 0.38rem;
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+    #desktop-edit-panel label span {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+    .desktop-edit-field-span-2 {
+      grid-column: 1 / -1;
+    }
+    #desktop-edit-panel input,
+    #desktop-edit-panel select {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0.78rem 0.9rem;
+      background: #ffffff;
+      color: var(--ink);
+      font: inherit;
+    }
+    #desktop-edit-panel input[type="file"] {
+      padding: 0.35rem;
+    }
+    #desktop-edit-panel input[type="file"]::file-selector-button {
+      margin-right: 0.65rem;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.5rem 0.78rem;
+      background: #f5f8fb;
+      color: var(--ink);
+      font: inherit;
+      cursor: pointer;
+    }
+    #desktop-edit-panel input[type="file"]::-webkit-file-upload-button {
+      margin-right: 0.65rem;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.5rem 0.78rem;
+      background: #f5f8fb;
+      color: var(--ink);
+      font: inherit;
+      cursor: pointer;
+    }
+    .desktop-edit-components {
+      padding: 1rem;
+      border: 1px solid #dde6ec;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.92);
+    }
+    #desktop-edit-panel .kit-component-editor {
+      display: grid;
+      gap: 0.7rem;
+      grid-template-columns: minmax(0, 1fr) 120px auto;
+      align-items: end;
+    }
+    #desktop-edit-panel .kit-component-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.1rem;
+    }
+    #desktop-edit-panel .kit-component-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.34rem 0.5rem 0.34rem 0.68rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 0.82rem;
+    }
+    #desktop-edit-panel .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin: 0;
+    }
+    #desktop-edit-panel .actions button,
+    #desktop-edit-component-add-btn,
+    #desktop-edit-panel .kit-component-pill button {
+      width: auto;
+      min-height: 48px;
+      border: 1px solid var(--accent);
+      border-radius: 12px;
+      padding: 0.78rem 1rem;
+      background: linear-gradient(180deg, var(--accent), var(--accent-dark));
+      color: #fff;
+      font-weight: 700;
+      box-shadow: none;
+      flex: 1 1 220px;
+    }
+    #desktop-edit-panel .actions button.secondary,
+    #desktop-edit-panel .kit-component-pill button.secondary {
+      border-color: var(--line);
+      background: #f5f8fb;
+      color: var(--ink);
+    }
+    #desktop-edit-panel .kit-component-pill button {
+      min-height: 0;
+      padding: 0.28rem 0.52rem;
+      font-size: 0.78rem;
+      border-radius: 999px;
+    }
+    #desktop-edit-panel .desktop-save-row {
+      justify-content: flex-start;
+      margin: 0;
+    }
+    #desktop-edit-status {
+      position: static;
+      margin: 0;
+      max-width: none;
+      box-shadow: none;
+    }
+    @media (max-width: 980px) {
+      .desktop-edit-layout,
+      .desktop-edit-fields,
+      #desktop-edit-panel .kit-component-editor {
+        grid-template-columns: 1fr;
+      }
+      .desktop-edit-field-span-2 {
+        grid-column: auto;
+      }
+      #desktop-edit-panel .actions button,
+      #desktop-edit-component-add-btn {
+        width: 100%;
+        flex-basis: auto;
+      }
+    }
+    @media (max-width: 640px) {
+      #desktop-edit-panel {
+        display: grid !important;
+        padding: 1rem;
+      }
+    }
 </style>""",
                 1,
             )
@@ -3026,34 +3384,71 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
         )
         panel = r'''
       <section class="info-panel" id="desktop-edit-panel">
-        <h2>Edit Item</h2>
-      <div class="meta-grid">
-        <label>Part number<input id="desktop-edit-id" type="text"></label>
-        <label>Name<input id="desktop-edit-name" type="text"></label>
-        <label>Category<input id="desktop-edit-category" type="text"></label>
-        <label>Quantity<input id="desktop-edit-qty" type="number" min="0"></label>
-        <label>QR/UPC<input id="desktop-edit-qr" type="text"></label>
-        <label>Color<input id="desktop-edit-color" type="text"></label>
-        <label>Material<input id="desktop-edit-material" type="text"></label>
-        <label>Parent product / kit<select id="desktop-edit-bom-product"><option value="">No parent</option></select></label>
-        <label>Qty used in parent<input id="desktop-edit-bom-qty" type="number" min="0"></label>
-        <label>Image<input id="desktop-edit-image" type="file" accept="image/*"></label>
+        <div class="desktop-edit-head">
+          <h2>Edit Item</h2>
+          <p class="desktop-edit-copy">Update stock details, parent links, and product or kit components without leaving this page.</p>
         </div>
-        <div id="desktop-edit-components-panel" class="cell-stack" hidden>
-          <div class="kit-component-editor">
-            <label>
-              <span>Product / kit components</span>
-              <select id="desktop-edit-component-select"><option value="">Select a part or kit</option></select>
-            </label>
-            <label>
-              <span>Qty per parent</span>
-              <input id="desktop-edit-component-qty" type="number" min="1" value="1">
-            </label>
-            <button id="desktop-edit-component-add-btn" type="button" class="secondary">Add Component</button>
+        <div class="desktop-edit-layout">
+          <div class="desktop-edit-form">
+            <div class="desktop-edit-fields">
+              <label>
+                <span>Part Number</span>
+                <input id="desktop-edit-id" type="text">
+              </label>
+              <label>
+                <span>Name</span>
+                <input id="desktop-edit-name" type="text">
+              </label>
+              <label>
+                <span>Category</span>
+                <input id="desktop-edit-category" type="text">
+              </label>
+              <label>
+                <span>Quantity</span>
+                <input id="desktop-edit-qty" type="number" min="0">
+              </label>
+              <label>
+                <span>QR/UPC</span>
+                <input id="desktop-edit-qr" type="text">
+              </label>
+              <label>
+                <span>Color</span>
+                <input id="desktop-edit-color" type="text">
+              </label>
+              <label>
+                <span>Material</span>
+                <input id="desktop-edit-material" type="text">
+              </label>
+              <label>
+                <span>Parent Product / Kit</span>
+                <select id="desktop-edit-bom-product"><option value="">No parent</option></select>
+              </label>
+              <label>
+                <span>Qty Used In Parent</span>
+                <input id="desktop-edit-bom-qty" type="number" min="0">
+              </label>
+              <label class="desktop-edit-field-span-2">
+                <span>Image</span>
+                <input id="desktop-edit-image" type="file" accept="image/*">
+              </label>
+            </div>
           </div>
-          <div class="cell-note">Choose existing parts or kits to link as this product or kit's components. Linked quantities move with this item's stock.</div>
-          <div id="desktop-edit-components-list" class="kit-component-list">
-            <span class="cell-note">No components selected yet.</span>
+          <div id="desktop-edit-components-panel" class="desktop-edit-components" hidden>
+            <div class="kit-component-editor">
+              <label>
+                <span>Product / Kit Components</span>
+                <select id="desktop-edit-component-select"><option value="">Select a part or kit</option></select>
+              </label>
+              <label>
+                <span>Qty Per Parent</span>
+                <input id="desktop-edit-component-qty" type="number" min="1" value="1">
+              </label>
+              <button id="desktop-edit-component-add-btn" type="button">Add Component</button>
+            </div>
+            <div class="cell-note">Choose existing parts or kits to link as this product or kit's components. Linked quantities move with this item's stock.</div>
+            <div id="desktop-edit-components-list" class="kit-component-list">
+              <span class="cell-note">No components selected yet.</span>
+            </div>
           </div>
         </div>
         <div class="actions">
@@ -3356,6 +3751,52 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
             '<a id="settings-nav-link" class="nav-link" href="/settings">Settings</a>',
             1,
         )
+        if "</style>" in html and "desktop-control-deck" not in html:
+            html = html.replace(
+                "</style>",
+                """
+    .desktop-control-deck {}
+    @media (min-width: 980px) {
+      main {
+        grid-template-columns: minmax(320px, 0.92fr) minmax(480px, 1.28fr);
+        align-items: start;
+      }
+      #inventory-tools-section .stack {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.85rem;
+        align-items: start;
+      }
+      #inventory-tools-section .stack > :first-child,
+      #inventory-tools-section .stack > :last-child {
+        grid-column: 1 / -1;
+      }
+      #inventory-tools-section .tab-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+      #inventory-tools-section .tab-strip .orders-tab {
+        grid-column: 1 / -1;
+      }
+      #inventory-tools-section .export-strip {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      #inventory-tools-section .tab-strip button,
+      #inventory-tools-section .export-strip button {
+        width: 100%;
+      }
+    }
+    @media (max-width: 979px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+      #inventory-tools-section .stack {
+        grid-template-columns: 1fr;
+      }
+    }
+</style>""",
+                1,
+            )
         html = html.replace(
             """        <div>
           <div class="small">CSV exports</div>
@@ -3378,6 +3819,11 @@ def create_app(data_dir: Path, firmware_ino: Path | None, bind_host: str = "0.0.
             <button class="secondary" type="button" data-export="kit">Export Kits</button>
           </div>
         </div>""",
+            1,
+        )
+        html = html.replace(
+            "      hostInfo.textContent = `${state.baseUrl} | Wi-Fi: ${wifiSummary} | SD: ${sdSummary} | Device: ${data.device_id || 'unknown'} | Time: ${data.time_source || 'unknown'}`;",
+            "      const storageSummary = data.storage_mode === 'pc_fs' ? 'PC ready' : sdSummary;\n      const desktopAddress = data.selected_lan_ip || data.lan_ip || 'offline';\n      hostInfo.textContent = `${state.baseUrl} | LAN/Ethernet: ${data.lan_connected ? desktopAddress : 'offline'} | Storage: ${storageSummary} | Device: ${data.device_id || 'unknown'} | Time: ${data.time_source || 'unknown'}`;",
             1,
         )
         script = r'''
@@ -4610,15 +5056,11 @@ document.getElementById('category').addEventListener('change',load);document.get
                 roots.append((store.items[idx], -needed))
 
             updated_at = current_timestamp()
-            deltas: dict[str, int] = {}
-            for item, delta in roots:
-                item_key = normalize_lookup_value(item.id)
-                deltas[item_key] = deltas.get(item_key, 0) + delta
-            delta_error = store.validate_stock_deltas(deltas)
+            deltas, delta_error = store.plan_fulfillment_stock_changes(roots)
             if delta_error:
                 return json_error(409, delta_error)
             store.apply_stock_deltas(deltas, updated_at)
-            total_removed = sum(abs(delta) for delta in deltas.values() if delta < 0)
+            total_removed = sum(abs(delta) for _, delta in roots if delta < 0)
             detail_chunks = []
             for delta_key, delta in deltas.items():
                 if delta >= 0:
@@ -4812,10 +5254,11 @@ document.getElementById('category').addEventListener('change',load);document.get
                 material=material,
                 qty=0,
                 image_ref=image_ref,
-                bom_product=bom_product,
-                bom_qty=bom_qty,
+                bom_product="",
+                bom_qty=0,
                 updated_at=current_timestamp(),
             )
+            store.set_item_parent_assignment(item, "", bom_product, bom_qty)
             store.items.append(item)
             component_error = store.apply_component_links(item, components)
             if component_error:
@@ -4883,6 +5326,7 @@ document.getElementById('category').addEventListener('change',load);document.get
                 return json_error(400, "An item cannot contain itself as a component.")
             rollback = [ItemRecord(**asdict(row)) for row in store.items]
             previous = ItemRecord(**asdict(store.items[idx]))
+            previous_parent_lookup, _ = primary_bom_link(previous)
             components, component_error = store.parse_component_links(components_raw)
             if component_error:
                 return json_error(400, component_error)
@@ -4900,9 +5344,8 @@ document.getElementById('category').addEventListener('change',load);document.get
             item.material = sanitize_field(arg("material"))
             item.qty = previous.qty
             item.image_ref = sanitize_field(arg("image_ref", item.image_ref))
-            item.bom_product = bom_product
-            item.bom_qty = bom_qty
             item.updated_at = current_timestamp()
+            store.set_item_parent_assignment(item, previous_parent_lookup, bom_product, bom_qty)
             component_error = store.replace_component_links(previous, item, components)
             if component_error:
                 store.items = rollback
@@ -4976,7 +5419,12 @@ document.getElementById('category').addEventListener('change',load);document.get
             deltas, delta_error = store.plan_inventory_stock_changes([(store.items[idx], -removed.qty)])
             if delta_error:
                 return json_error(400, delta_error)
-            store.apply_stock_deltas(deltas, current_timestamp())
+            updated_at = current_timestamp()
+            store.apply_stock_deltas(deltas, updated_at)
+            for component in store.bom_components_for_parent(removed):
+                links = store.filter_bom_links(store.bom_links_for_item(component), parent=removed)
+                store.sync_item_bom_links(component, links)
+                component.updated_at = updated_at
             del store.items[idx]
             if not store._save_inventory():
                 store.items = rollback
@@ -5073,9 +5521,10 @@ document.getElementById('category').addEventListener('change',load);document.get
                 if store.matches_category_filter(item, category_filter)
             ]
         csv_lines = [
-            "part_number,category,part_name,qr_code,color,material,qty,image_ref,bom_product,bom_qty,updated_at,qr_link"
+            "part_number,category,part_name,qr_code,color,material,qty,image_ref,bom_product,bom_qty,updated_at,bom_links,qr_link"
         ]
         for item in rows:
+            primary_parent, primary_qty = primary_bom_link(item)
             csv_lines.append(
                 ",".join(
                     [
@@ -5087,9 +5536,10 @@ document.getElementById('category').addEventListener('change',load);document.get
                         csv_escape(item.material),
                         str(item.qty),
                         csv_escape(item.image_ref),
-                        csv_escape(item.bom_product),
-                        str(item.bom_qty),
+                        csv_escape(primary_parent),
+                        str(primary_qty),
                         csv_escape(item.updated_at),
+                        csv_escape(encode_bom_links(store.bom_links_for_item(item))),
                         csv_escape(store.item_url(item.id, base_url())),
                     ]
                 )

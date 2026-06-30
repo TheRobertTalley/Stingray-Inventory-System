@@ -1772,6 +1772,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       background: #fff;
     }
 
+    .inventory-table {
+      min-width: 980px;
+    }
+
     .quick-action h2 {
       margin: 0 0 0.85rem;
     }
@@ -1843,6 +1847,87 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       background: #fff;
       color: var(--ink);
       font: inherit;
+    }
+
+    .draft-form-host {
+      margin: 0 0 1rem;
+    }
+
+    .draft-form-panel {
+      display: grid;
+      gap: 0.85rem;
+      padding: 0.9rem;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #f8fbfd;
+      box-shadow: var(--shadow);
+    }
+
+    .draft-form-grid {
+      display: grid;
+      gap: 0.8rem;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      align-items: start;
+    }
+
+    .draft-form-field {
+      display: grid;
+      gap: 0.38rem;
+      min-width: 0;
+    }
+
+    .draft-form-field > span {
+      font-size: 0.74rem;
+      font-weight: 700;
+      color: var(--muted);
+    }
+
+    .draft-form-field-wide {
+      grid-column: span 2;
+    }
+
+    .draft-form-actions {
+      display: grid;
+      gap: 0.42rem;
+      align-self: end;
+    }
+
+    .draft-form-actions button {
+      width: 100%;
+    }
+
+    .draft-file-input {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      font-size: 0;
+      color: transparent;
+      overflow: hidden;
+      cursor: pointer;
+    }
+
+    .draft-file-input::file-selector-button {
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.48rem 0.78rem;
+      background: #f5f8fb;
+      color: var(--ink);
+      font: inherit;
+      font-size: 0.92rem;
+      cursor: pointer;
+    }
+
+    .draft-file-input::-webkit-file-upload-button {
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.48rem 0.78rem;
+      background: #f5f8fb;
+      color: var(--ink);
+      font: inherit;
+      font-size: 0.92rem;
+      cursor: pointer;
     }
 
     .cell-stack {
@@ -1922,7 +2007,27 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       font-size: 0.78rem;
     }
 
+    @media (max-width: 1100px) {
+      .draft-form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .draft-form-actions,
+      .draft-form-field-wide {
+        grid-column: span 2;
+      }
+    }
+
     @media (max-width: 720px) {
+      .draft-form-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .draft-form-actions,
+      .draft-form-field-wide {
+        grid-column: auto;
+      }
+
       .kit-component-editor {
         grid-template-columns: 1fr;
       }
@@ -2558,6 +2663,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <section id="inventory-table-section" class="wide">
       <h2 id="inventory-title">All Inventory</h2>
       <p class="caption" id="inventory-caption">Loading inventory...</p>
+      <div id="draft-form-host" class="draft-form-host"></div>
       <div class="table-wrap">
         <table class="inventory-table">
           <thead>
@@ -2629,6 +2735,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     const orderFulfillSection = document.getElementById('order-fulfill-section');
     const settingsSection = document.getElementById('settings-section');
     const inventoryTableSection = document.getElementById('inventory-table-section');
+    const draftFormHost = document.getElementById('draft-form-host');
     const itemsBody = document.getElementById('items-body');
     const ordersListBody = document.getElementById('orders-list-body');
     const ordersSummary = document.getElementById('orders-summary');
@@ -3341,10 +3448,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     function focusDraftField(selector = '[data-draft-field="id"]') {
       window.setTimeout(() => {
-        const field = itemsBody.querySelector(selector);
+        const field = inventoryTableSection.querySelector(selector);
         if (field) {
           field.focus();
-          if (typeof field.select === 'function') {
+          if (typeof field.select === 'function' && field.type !== 'file') {
             field.select();
           }
         }
@@ -3528,45 +3635,40 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         .join('\n');
     }
 
-    function renderDraftComponentRow() {
+    function renderDraftComponentsPanel() {
       if (!draftItemCanOwnBom()) {
-        return null;
+        return '';
       }
 
-      const row = document.createElement('tr');
-      row.className = 'kit-component-row';
       const selected = state.draftComponents || [];
       const candidates = draftComponentCandidates();
-      row.innerHTML = `
-        <td colspan="9">
-          <div class="cell-stack">
-            <div class="kit-component-editor">
-              <label>
-                <span>Product / kit components</span>
-                <input data-draft-component-select type="text" list="draft-component-options" placeholder="Paste existing part or kit number" value="${escapeHtml(state.draftComponentId || '')}" autocomplete="off" spellcheck="false">
-                <datalist id="draft-component-options">
-                  ${draftComponentOptionsHtml()}
-                </datalist>
-              </label>
-              <label>
-                <span>Qty per parent</span>
-                <input data-draft-component-qty type="number" min="1" value="${escapeHtml(state.draftComponentQty || '1')}">
-              </label>
-              <button type="button" class="secondary" data-draft-component-add${candidates.length ? '' : ' disabled'}>Add Component</button>
-            </div>
-            <div class="cell-note">Paste an existing part number or kit number, or pick from suggestions. The full inventory stays visible below while you build this ${escapeHtml(draftCategoryLabelFor(state.draftItem.category).toLowerCase())}.</div>
-            <div class="kit-component-list">
-              ${selected.length ? selected.map((component, index) => `
-                <span class="kit-component-pill">
-                  ${escapeHtml(component.id)} x ${escapeHtml(component.qty)}
-                  <button type="button" class="secondary" data-draft-component-remove="${index}">Remove</button>
-                </span>
-              `).join('') : '<span class="cell-note">No components selected yet.</span>'}
-            </div>
+      return `
+        <div class="cell-stack">
+          <div class="kit-component-editor">
+            <label>
+              <span>Product / kit components</span>
+              <input data-draft-component-select type="text" list="draft-component-options" placeholder="Paste existing part or kit number" value="${escapeHtml(state.draftComponentId || '')}" autocomplete="off" spellcheck="false">
+              <datalist id="draft-component-options">
+                ${draftComponentOptionsHtml()}
+              </datalist>
+            </label>
+            <label>
+              <span>Qty per parent</span>
+              <input data-draft-component-qty type="number" min="1" value="${escapeHtml(state.draftComponentQty || '1')}">
+            </label>
+            <button type="button" class="secondary" data-draft-component-add${candidates.length ? '' : ' disabled'}>Add Component</button>
           </div>
-        </td>
+          <div class="cell-note">Paste an existing part number or kit number, or pick from suggestions. The full inventory stays visible below while you build this ${escapeHtml(draftCategoryLabelFor(state.draftItem.category).toLowerCase())}.</div>
+          <div class="kit-component-list">
+            ${selected.length ? selected.map((component, index) => `
+              <span class="kit-component-pill">
+                ${escapeHtml(component.id)} x ${escapeHtml(component.qty)}
+                <button type="button" class="secondary" data-draft-component-remove="${index}">Remove</button>
+              </span>
+            `).join('') : '<span class="cell-note">No components selected yet.</span>'}
+          </div>
+        </div>
       `;
-      return row;
     }
 
     function addDraftComponent() {
@@ -3614,59 +3716,59 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       renderItems(filteredItems());
     }
 
-    function renderDraftRow() {
+    function renderDraftPanel() {
       if (!state.draftItem) {
         return null;
       }
 
       const draftCategory = draftCategoryValue(state.draftItem.category);
-      const row = document.createElement('tr');
-      row.className = 'draft-row';
-      row.innerHTML = `
-        <td>
-          <div class="cell-stack">
-            <div class="cell-note">${escapeHtml(draftIdentifierLabelFor(draftCategory))}</div>
+      const panel = document.createElement('div');
+      panel.className = 'draft-form-panel';
+      panel.innerHTML = `
+        <div class="draft-form-grid">
+          <label class="draft-form-field">
+            <span>${escapeHtml(draftIdentifierLabelFor(draftCategory))}</span>
             <input data-draft-field="id" type="text" placeholder="${escapeHtml(draftIdentifierLabelFor(draftCategory))}" value="${escapeHtml(state.draftItem.id)}" required>
-          </div>
-        </td>
-        <td>
-          <div class="cell-stack">
+          </label>
+          <div class="draft-form-field">
+            <span>Category</span>
             <div class="draft-category-display">${escapeHtml(draftCategoryLabelFor(draftCategory))}</div>
             <div class="cell-note">${escapeHtml(draftActionNoteFor(draftCategory))}</div>
           </div>
-        </td>
-        <td>
-          <div class="cell-stack">
+          <label class="draft-form-field">
+            <span>Name</span>
             <input data-draft-field="part_name" type="text" placeholder="Name" value="${escapeHtml(state.draftItem.part_name)}" required>
-          </div>
-        </td>
-        <td>${recentSelectHtml('color', 'colors', 'Select color', 'Add new color')}</td>
-        <td class="material-cell">${recentSelectHtml('material', 'materials', 'Select material', 'Add new material')}</td>
-        <td>
-          <div class="cell-stack">
+          </label>
+          <label class="draft-form-field">
+            <span>Qty</span>
             <input data-draft-field="qty" type="number" min="0" value="${escapeHtml(state.draftItem.qty)}">
+          </label>
+          <div class="draft-form-field">
+            <span>Color</span>
+            ${recentSelectHtml('color', 'colors', 'Select color', 'Add new color')}
           </div>
-        </td>
-        <td>
-          <div class="cell-stack">
-            <input data-draft-image-file type="file" accept="image/*">
+          <div class="draft-form-field">
+            <span>Material</span>
+            ${recentSelectHtml('material', 'materials', 'Select material', 'Add new material')}
+          </div>
+          <div class="draft-form-field draft-form-field-wide">
+            <span>Image</span>
+            <input class="draft-file-input" data-draft-image-file type="file" accept="image/*">
             <div class="cell-note">${escapeHtml(draftImageSummary())}</div>
           </div>
-        </td>
-        <td>
-          <div class="cell-stack">
+          <label class="draft-form-field draft-form-field-wide">
+            <span>QR Code</span>
             <input data-draft-field="qr_code" type="text" placeholder="QR or UPC value" value="${escapeHtml(state.draftItem.qr_code)}">
             <div class="cell-note">Stored reference code. Printed QR still uses the item link.</div>
-          </div>
-        </td>
-        <td>
-          <div class="inline-actions">
+          </label>
+          <div class="draft-form-actions">
             <button type="button" data-draft-action="save">Save</button>
             <button type="button" class="secondary" data-draft-action="cancel">Cancel</button>
           </div>
-        </td>
+        </div>
+        ${renderDraftComponentsPanel()}
       `;
-      return row;
+      return panel;
     }
 
     function openQrPreview(itemId, link, qrSrc) {
@@ -4303,16 +4405,13 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     function renderItems(items) {
       itemsBody.innerHTML = '';
+      draftFormHost.innerHTML = '';
       renderCaption(items);
 
       if (shouldShowDraftRow()) {
-        const draftRow = renderDraftRow();
-        if (draftRow) {
-          itemsBody.appendChild(draftRow);
-        }
-        const componentRow = renderDraftComponentRow();
-        if (componentRow) {
-          itemsBody.appendChild(componentRow);
+        const draftPanel = renderDraftPanel();
+        if (draftPanel) {
+          draftFormHost.appendChild(draftPanel);
         }
       }
 
@@ -4905,7 +5004,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         });
       }
 
-      itemsBody.addEventListener('click', (event) => {
+      inventoryTableSection.addEventListener('click', (event) => {
         const componentAddButton = event.target.closest('[data-draft-component-add]');
         if (componentAddButton && state.draftItem) {
           addDraftComponent();
@@ -4960,7 +5059,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         );
       });
 
-      itemsBody.addEventListener('input', (event) => {
+      inventoryTableSection.addEventListener('input', (event) => {
         if (!state.draftItem) {
           return;
         }
@@ -4987,7 +5086,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         }
       });
 
-      itemsBody.addEventListener('change', (event) => {
+      inventoryTableSection.addEventListener('change', (event) => {
         if (!state.draftItem) {
           return;
         }
@@ -5023,12 +5122,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         renderItems(filteredItems());
       });
 
-      itemsBody.addEventListener('keydown', (event) => {
+      inventoryTableSection.addEventListener('keydown', (event) => {
         if (!state.draftItem) {
           return;
         }
 
-        if (event.key === 'Enter' && event.target.closest('.draft-row')) {
+        if (event.key === 'Enter' && event.target.closest('.draft-form-panel')) {
           event.preventDefault();
           (async () => {
             try {
@@ -5835,8 +5934,10 @@ const char ITEM_HTML[] PROGMEM = R"HTML(
     function applyBranding(status) {
       const brandName = status && status.brand_name ? status.brand_name : 'Inventory Update';
       const brandLogoRef = status && status.brand_logo_ref ? status.brand_logo_ref : '';
-      pageBrandTitleEl.textContent = `${brandName} Inventory Update`;
-      document.title = `${brandName} Item Update`;
+      const pageTitle = /inventory\s*$/i.test(brandName) ? `${brandName} Update` : `${brandName} Inventory Update`;
+      const documentTitle = /inventory\s*$/i.test(brandName) ? `${brandName} Item` : `${brandName} Item Update`;
+      pageBrandTitleEl.textContent = pageTitle;
+      document.title = documentTitle;
 
       const logoUrl = resolveImageUrl(brandLogoRef);
       if (logoUrl) {
